@@ -61,6 +61,7 @@ try {
     "Start-GPTCanvas.vbs",
     "Start-GPTInfiniteCanvas-Chrome.ps1",
     "Start-GPTInfiniteCanvas-Chrome.vbs",
+    "Install-GPTInfiniteCanvas-DesktopLauncher.cmd",
     "Install-GPTInfiniteCanvas-DesktopLauncher.ps1",
     "Run-GPTCanvas-Service.cmd",
     "Stop-GPTCanvas.vbs",
@@ -104,7 +105,8 @@ try {
     createdAt: new Date().toISOString(),
     nodeMinimum: "24.0.0",
     entrypoint: "05_installer_and_ops/Start-GPTInfiniteCanvas-Chrome.vbs",
-    desktopInstaller: "05_installer_and_ops/Install-GPTInfiniteCanvas-DesktopLauncher.ps1",
+    desktopInstaller: "05_installer_and_ops/Install-GPTInfiniteCanvas-DesktopLauncher.cmd",
+    desktopInstallerScript: "05_installer_and_ops/Install-GPTInfiniteCanvas-DesktopLauncher.ps1",
     legacyEntrypoint: "05_installer_and_ops/Start-GPTCanvas.vbs",
     endpoints: {
       canvas: "http://127.0.0.1:3230",

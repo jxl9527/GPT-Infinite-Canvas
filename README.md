@@ -77,13 +77,13 @@ npm run build:canvas
 
 ### Chrome 桌面启动器
 
-运行：
+源码环境可运行：
 
 ```powershell
 pwsh app\05_installer_and_ops\Install-GPTInfiniteCanvas-DesktopLauncher.ps1
 ```
 
-桌面会生成“GPT 无限画布”快捷方式。双击后自动启动本地服务，并明确使用 Google Chrome 新窗口打开画布，不改变 Windows 的默认浏览器设置；Microsoft Edge 可以继续作为日常默认浏览器。
+从 GitHub Release 下载并解压后，也可以直接双击 `05_installer_and_ops\Install-GPTInfiniteCanvas-DesktopLauncher.cmd`。桌面会生成“GPT 无限画布”快捷方式。双击后自动启动本地服务，并明确使用 Google Chrome 新窗口打开画布，不改变 Windows 的默认浏览器设置；Microsoft Edge 可以继续作为日常默认浏览器。
 
 启动器图标基于 MIT 许可的 [Tabler Infinity](https://tabler.io/icons/icon/infinity) 设计，来源与许可证保存在 `app\05_installer_and_ops\assets\launcher`。
 
