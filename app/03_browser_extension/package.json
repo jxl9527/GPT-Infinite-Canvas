@@ -1,0 +1,16 @@
+{
+  "name": "@gpt-canvas/browser-extension",
+  "version": "1.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "tsc -p tsconfig.json --noEmit --pretty false && tsc -p tsconfig.content.json --noEmit --pretty false && tsc -p tsconfig.test.json --noEmit --pretty false",
+    "test": "npm run build && npm run test:built",
+    "test:built": "tsc -p tsconfig.test.json && node --test .test-dist/test/*.test.js",
+    "clean": "node scripts/clean.mjs"
+  },
+  "dependencies": {
+    "@gpt-canvas/shared": "file:../04_shared_packages"
+  }
+}

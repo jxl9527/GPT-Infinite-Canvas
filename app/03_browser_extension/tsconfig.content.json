@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "None",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "useUnknownInCatchVariables": true,
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": [],
+    "rootDir": "src/content",
+    "outDir": ".build/content",
+    "sourceMap": true
+  },
+  "files": [
+    "src/chrome-globals.d.ts",
+    "src/content/page-state.ts",
+    "src/content/chatgpt-adapter.ts",
+    "src/content/content.ts",
+    "src/content/canvas-trigger.ts"
+  ]
+}

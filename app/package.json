@@ -1,0 +1,30 @@
+{
+  "name": "gpt-infinite-canvas",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "01_canvas_app",
+    "02_bridge_service",
+    "03_browser_extension",
+    "04_shared_packages"
+  ],
+  "scripts": {
+    "build": "tsc -b 04_shared_packages 02_bridge_service && npm run build --workspace @gpt-canvas/browser-extension",
+    "check": "tsc -b 04_shared_packages 02_bridge_service --pretty false && npm run check --workspace @gpt-canvas/browser-extension",
+    "test": "npm run build && npm run test --workspace @gpt-canvas/shared && npm run test --workspace @gpt-canvas/bridge-service && npm run test:built --workspace @gpt-canvas/browser-extension",
+    "clean": "tsc -b 04_shared_packages 02_bridge_service --clean && npm run clean --workspace @gpt-canvas/browser-extension",
+    "build:canvas": "npm run build --workspace @gpt-canvas/shared && npm run build --workspace @gpt-canvas/canvas-app",
+    "check:canvas": "npm run check --workspace @gpt-canvas/shared && npm run check --workspace @gpt-canvas/canvas-app",
+    "test:canvas": "npm run build --workspace @gpt-canvas/shared && npm run test --workspace @gpt-canvas/canvas-app",
+    "verify:release": "node scripts/verify-release.mjs",
+    "package:release": "node scripts/package-release.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

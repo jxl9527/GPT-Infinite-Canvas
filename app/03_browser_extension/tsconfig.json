@@ -1,0 +1,19 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "rootDir": "src",
+    "outDir": ".build/module",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": []
+  },
+  "include": [
+    "src/chrome-globals.d.ts",
+    "src/protocol.ts",
+    "src/background-guards.ts",
+    "src/background.ts",
+    "src/popup.ts"
+  ]
+}

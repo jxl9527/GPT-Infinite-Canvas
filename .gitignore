@@ -1,0 +1,34 @@
+# Dependencies and build outputs
+**/node_modules/
+**/dist/
+**/.build/
+**/.test-dist/
+**/coverage/
+**/*.tsbuildinfo
+
+# Local runtime data and credentials
+app/**/runtime/
+app/**/.env
+app/**/.env.*
+app/output/
+*.pid
+*.log
+*.jsonl
+*.ndjson
+
+# Local release artifacts
+releases/
+*.zip
+
+# Legacy local folders retained only for recovery; never publish
+03_本地应用/
+06_交付与运维/
+
+# Editor and operating-system files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Keep intentional placeholders
+!.gitkeep

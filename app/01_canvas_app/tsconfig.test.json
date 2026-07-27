@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "skipLibCheck": true,
+    "types": ["node"],
+    "rootDir": ".",
+    "outDir": ".test-dist"
+  },
+  "include": ["src/canvas-math.ts", "src/canvas-layout.ts", "src/canvas-input.ts", "src/canvas-automation.ts", "src/annotation-model.ts", "src/task-preview.ts", "src/project-state.ts", "test/**/*.ts"]
+}
