@@ -77,7 +77,7 @@ async function apiError(response: Response): Promise<Error> {
   return new Error(body.error?.message || `本地文件服务返回 ${response.status}`);
 }
 
-export async function connectCanvasSession(): Promise<void> {
+export async function connectCanvasSession(): Promise<string> {
   const response = await fetch(`${BRIDGE_BASE_URL}/api/v1/canvas/session`, {
     method: "GET",
     cache: "no-store"
@@ -86,6 +86,11 @@ export async function connectCanvasSession(): Promise<void> {
   const body = await response.json() as { token?: unknown };
   if (typeof body.token !== "string" || !body.token) throw new Error("本地文件服务未返回有效会话");
   sessionToken = body.token;
+  return sessionToken;
+}
+
+export async function getCurrentBridgeToken(): Promise<string> {
+  return connectCanvasSession();
 }
 
 async function authenticatedFetch(path: string, init: RequestInit = {}): Promise<Response> {

@@ -61,7 +61,7 @@ npm run build:canvas
 
 构建完成后：
 
-1. 双击 `app\05_installer_and_ops\Start-GPTCanvas.vbs` 启动画布。
+1. 双击 `app\05_installer_and_ops\Start-GPTCanvas.vbs` 启动画布；或运行桌面启动器安装脚本，固定使用 Chrome。
 2. 在 Chrome / Edge 的扩展管理页开启开发者模式。
 3. 加载 `app\03_browser_extension\dist` 作为已解压扩展。
 4. 按 [安装与使用](docs/guides/安装与使用.md) 完成本地桥接配置。
@@ -72,6 +72,20 @@ npm run build:canvas
 - 本地桥接：`http://127.0.0.1:3220`
 
 进入项目工作台后，可以直接输入名称创建空白项目，也可以先附加项目需求 Markdown。画布支持拖放图片或点击左侧“导入”；`Ctrl+Z / Ctrl+Y` 用于撤销和重做，方向键用于微调当前图片或批注。
+
+项目登记页可直接复制当前服务正在使用的桥接令牌，避免误用测试目录中的同名令牌文件。
+
+### Chrome 桌面启动器
+
+运行：
+
+```powershell
+pwsh app\05_installer_and_ops\Install-GPTInfiniteCanvas-DesktopLauncher.ps1
+```
+
+桌面会生成“GPT 无限画布”快捷方式。双击后自动启动本地服务，并明确使用 Google Chrome 新窗口打开画布，不改变 Windows 的默认浏览器设置；Microsoft Edge 可以继续作为日常默认浏览器。
+
+启动器图标基于 MIT 许可的 [Tabler Infinity](https://tabler.io/icons/icon/infinity) 设计，来源与许可证保存在 `app\05_installer_and_ops\assets\launcher`。
 
 ## 项目结构
 

@@ -11,6 +11,7 @@ import {
   activateWorkbenchProject,
   connectCanvasSession,
   createWorkbenchProject,
+  getCurrentBridgeToken,
   listWorkbenchProjects,
   previewProjectRequirements,
   type ProjectRequirementsPreview,
@@ -28,6 +29,24 @@ function projectDate(value: string): string {
     : new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" }).format(date);
 }
 
+async function copyText(value: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+
+  const input = document.createElement("textarea");
+  input.value = value;
+  input.setAttribute("readonly", "");
+  input.style.position = "fixed";
+  input.style.opacity = "0";
+  document.body.appendChild(input);
+  input.select();
+  const copied = document.execCommand("copy");
+  input.remove();
+  if (!copied) throw new Error("浏览器未允许写入剪贴板");
+}
+
 export function ProjectWorkbench({ onOpen }: ProjectWorkbenchProps) {
   const [projects, setProjects] = useState<WorkbenchProject[]>([]);
   const [name, setName] = useState("");
@@ -37,6 +56,8 @@ export function ProjectWorkbench({ onOpen }: ProjectWorkbenchProps) {
   const [parsingRequirements, setParsingRequirements] = useState(false);
   const [requirementsContent, setRequirementsContent] = useState("");
   const [requirementsPreview, setRequirementsPreview] = useState<ProjectRequirementsPreview | null>(null);
+  const [copyingToken, setCopyingToken] = useState(false);
+  const [tokenCopied, setTokenCopied] = useState(false);
   const [error, setError] = useState("");
   const requirementsInputRef = useRef<HTMLInputElement>(null);
 
@@ -121,13 +142,33 @@ export function ProjectWorkbench({ onOpen }: ProjectWorkbenchProps) {
     void readRequirements(event.dataTransfer.files?.[0]);
   };
 
+  const copyBridgeToken = async () => {
+    if (copyingToken) return;
+    setCopyingToken(true);
+    setTokenCopied(false);
+    setError("");
+    try {
+      const currentToken = await getCurrentBridgeToken();
+      await copyText(currentToken);
+      setTokenCopied(true);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "桥接令牌复制失败");
+    } finally {
+      setCopyingToken(false);
+    }
+  };
+
   return (
     <main className="workbench-shell">
       <div className="workbench-grid" aria-hidden="true" />
 
       <section className="workbench-intro" aria-labelledby="workbench-title">
-        <span className="workbench-index">望岳 / 杜甫</span>
-        <h1 id="workbench-title">造化钟神秀，<br />阴阳割昏晓。<br />会当凌绝顶，<br />一览众山小。</h1>
+        <span className="workbench-index">道德经 / 老子</span>
+        <h1 id="workbench-title">
+          <span>凿户牖以为室，</span>
+          <span>当其无，</span>
+          <span>有室之用。</span>
+        </h1>
       </section>
 
       <section className="project-ledger" aria-label="项目列表">
@@ -136,9 +177,20 @@ export function ProjectWorkbench({ onOpen }: ProjectWorkbenchProps) {
             <span>PROJECT REGISTER</span>
             <h2>项目登记簿</h2>
           </div>
-          <button type="button" className="workbench-refresh" onClick={() => void load()} disabled={loading}>
-            {loading ? "读取中" : "刷新"}
-          </button>
+          <div className="workbench-heading-actions">
+            <button
+              type="button"
+              className="workbench-token"
+              onClick={() => void copyBridgeToken()}
+              disabled={copyingToken}
+              aria-live="polite"
+            >
+              {copyingToken ? "正在读取…" : tokenCopied ? "令牌已复制" : "复制桥接令牌"}
+            </button>
+            <button type="button" className="workbench-refresh" onClick={() => void load()} disabled={loading}>
+              {loading ? "读取中" : "刷新"}
+            </button>
+          </div>
         </div>
 
         <form className="new-project-line" onSubmit={(event) => void create(event)}>

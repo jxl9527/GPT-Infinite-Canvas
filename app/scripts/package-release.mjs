@@ -50,6 +50,9 @@ try {
   for (const name of [
     "Start-GPTCanvas.cmd",
     "Start-GPTCanvas.vbs",
+    "Start-GPTInfiniteCanvas-Chrome.ps1",
+    "Start-GPTInfiniteCanvas-Chrome.vbs",
+    "Install-GPTInfiniteCanvas-DesktopLauncher.ps1",
     "Run-GPTCanvas-Service.cmd",
     "Stop-GPTCanvas.vbs",
     "Backup-P1Project.ps1",
@@ -61,6 +64,10 @@ try {
       join(bundleRoot, "05_installer_and_ops", name)
     );
   }
+  await copy(
+    join(appRoot, "05_installer_and_ops", "assets", "launcher"),
+    join(bundleRoot, "05_installer_and_ops", "assets", "launcher")
+  );
   await copy(
     join(workspaceRoot, "docs", "guides", "安装与使用.md"),
     join(bundleRoot, "README.md")
@@ -79,7 +86,9 @@ try {
     releaseVersion: version,
     createdAt: new Date().toISOString(),
     nodeMinimum: "24.0.0",
-    entrypoint: "05_installer_and_ops/Start-GPTCanvas.vbs",
+    entrypoint: "05_installer_and_ops/Start-GPTInfiniteCanvas-Chrome.vbs",
+    desktopInstaller: "05_installer_and_ops/Install-GPTInfiniteCanvas-DesktopLauncher.ps1",
+    legacyEntrypoint: "05_installer_and_ops/Start-GPTCanvas.vbs",
     endpoints: {
       canvas: "http://127.0.0.1:3230",
       bridge: "http://127.0.0.1:3220"
