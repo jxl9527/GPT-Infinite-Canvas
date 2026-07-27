@@ -47,6 +47,15 @@ try {
     const readme = join(sourceRoot, "README.md");
     if ((await stat(readme).catch(() => null))?.isFile()) await copy(readme, join(targetRoot, "README.md"));
   }
+  const packagedSharedRoot = join(bundleRoot, "node_modules", "@gpt-canvas", "shared");
+  await copy(
+    join(appRoot, "04_shared_packages", "package.json"),
+    join(packagedSharedRoot, "package.json")
+  );
+  await copy(
+    join(appRoot, "04_shared_packages", "dist"),
+    join(packagedSharedRoot, "dist")
+  );
   for (const name of [
     "Start-GPTCanvas.cmd",
     "Start-GPTCanvas.vbs",
@@ -72,6 +81,14 @@ try {
     join(workspaceRoot, "docs", "guides", "安装与使用.md"),
     join(bundleRoot, "README.md")
   );
+  const runtimeDependencyCheck = spawnSync(
+    process.execPath,
+    ["--input-type=module", "--eval", 'await import("@gpt-canvas/shared")'],
+    { cwd: bundleRoot, encoding: "utf8", windowsHide: true }
+  );
+  if (runtimeDependencyCheck.status !== 0) {
+    throw new Error(runtimeDependencyCheck.stderr || "发布包共享运行库解析失败");
+  }
   const files = [];
   for (const path of (await filesRecursively(bundleRoot)).sort()) {
     const bytes = await readFile(path);
