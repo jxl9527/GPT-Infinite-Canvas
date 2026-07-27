@@ -18,6 +18,7 @@ import "konva/lib/shapes/Rect";
 import "konva/lib/shapes/Text";
 import "konva/lib/shapes/Transformer";
 import {
+  cancelGenerationTask,
   connectCanvasSession,
   createGenerationTask,
   downloadOriginalAsset,
@@ -27,6 +28,7 @@ import {
   readActiveProjectRequirements,
   readActiveGenerationTask,
   readCanvasAssetAsDataUrl,
+  readCanvasAssetAsObjectUrl,
   readCanvasProject,
   readFileAsDataUrl,
   readGenerationResultAsDataUrl,
@@ -37,6 +39,7 @@ import {
   saveCanvasProject,
   saveAnnotationExport,
   deletePromptLibraryItem,
+  releaseAllCanvasAssetObjectUrls,
   updateActiveProjectRequirements,
   type ActiveProjectRequirements,
   type PromptLibraryItem
@@ -81,6 +84,13 @@ import {
   buildCanvasProjectDocument,
   restoreCanvasProjectStructure
 } from "./project-state";
+import {
+  createCanvasHistory,
+  moveCanvasHistory,
+  pushCanvasHistory,
+  type CanvasHistorySnapshot,
+  type CanvasHistoryState
+} from "./canvas-history";
 
 type Tool = "select" | "text" | "arrow" | "freehand" | "rectangle";
 type ServiceState = "connecting" | "connected" | "offline";
@@ -97,6 +107,16 @@ interface TextEditorState {
 interface Size {
   width: number;
   height: number;
+}
+
+interface LatestSaveState {
+  projectName: string;
+  revision: number;
+  viewport: Viewport;
+  nodes: ImageNodeState[];
+  annotations: AnnotationState[];
+  generationTask: GenerationTask | null;
+  taskParentVersionId: `version_${string}` | null;
 }
 
 function useElementSize<T extends HTMLElement>() {
@@ -116,6 +136,7 @@ function useElementSize<T extends HTMLElement>() {
   return { ref, size };
 }
 
+const MAX_BROWSER_IMAGE_CACHE = 64;
 const browserImageCache = new Map<string, Promise<HTMLImageElement>>();
 
 function loadBrowserImage(src: string): Promise<HTMLImageElement> {
@@ -128,13 +149,21 @@ function loadBrowserImage(src: string): Promise<HTMLImageElement> {
     image.src = src;
   });
   browserImageCache.set(src, pending);
+  if (browserImageCache.size > MAX_BROWSER_IMAGE_CACHE) {
+    const oldest = browserImageCache.keys().next().value as string | undefined;
+    if (oldest && oldest !== src) browserImageCache.delete(oldest);
+  }
   pending.catch(() => browserImageCache.delete(src));
   return pending;
 }
 
-function useBrowserImage(src: string) {
+function useBrowserImage(src: string, enabled = true) {
   const [image, setImage] = useState<HTMLImageElement | null>(null);
   useEffect(() => {
+    if (!enabled) {
+      setImage(null);
+      return;
+    }
     let cancelled = false;
     void loadBrowserImage(src).then((next) => {
       if (!cancelled) setImage(next);
@@ -142,7 +171,7 @@ function useBrowserImage(src: string) {
       if (!cancelled) setImage(null);
     });
     return () => { cancelled = true; };
-  }, [src]);
+  }, [enabled, src]);
   return image;
 }
 
@@ -190,6 +219,7 @@ function CanvasImageNode({
   node,
   selected,
   selectable,
+  loadImage,
   roleLabel,
   viewportScale,
   register,
@@ -199,13 +229,14 @@ function CanvasImageNode({
   node: ImageNodeState;
   selected: boolean;
   selectable: boolean;
+  loadImage: boolean;
   roleLabel?: string;
   viewportScale: number;
   register: (instance: Konva.Group | null) => void;
   onSelect: () => void;
   onChange: (next: ImageNodeState) => void;
 }) {
-  const image = useBrowserImage(node.src);
+  const image = useBrowserImage(node.src, loadImage);
   const roleScale = fixedScreenScale(viewportScale);
   const crop = coverCropForRenderedImage(
     image ? { width: image.naturalWidth, height: image.naturalHeight } : null,
@@ -453,6 +484,7 @@ export function App({ projectName }: { projectName: string }) {
   const [savingPrompt, setSavingPrompt] = useState(false);
   const [generationTask, setGenerationTask] = useState<GenerationTask | null>(null);
   const [creatingTask, setCreatingTask] = useState(false);
+  const [cancellingTask, setCancellingTask] = useState(false);
   const [returningResults, setReturningResults] = useState(false);
   const [automationReady, setAutomationReady] = useState(
     () => ["ready", "started"].includes(document.documentElement.getAttribute("data-gpt-canvas-automation-status") ?? "")
@@ -461,11 +493,13 @@ export function App({ projectName }: { projectName: string }) {
   const [returnedResultIds, setReturnedResultIds] = useState<string[]>([]);
   const [projectLoaded, setProjectLoaded] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>("loading");
+  const [historyVersion, setHistoryVersion] = useState(0);
   const stageRef = useRef<Konva.Stage>(null);
   const middlePanningRef = useRef(false);
   const transformerRef = useRef<Konva.Transformer>(null);
   const annotationTransformerRef = useRef<Konva.Transformer>(null);
   const textEditorRef = useRef<HTMLTextAreaElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
   const promptPickerRef = useRef<HTMLDetailsElement>(null);
   const nodeRefs = useRef(new Map<string, Konva.Group>());
   const annotationRefs = useRef(new Map<string, Konva.Group>());
@@ -475,6 +509,34 @@ export function App({ projectName }: { projectName: string }) {
   const projectCreatedAtRef = useRef(new Date().toISOString());
   const lastSavedRevisionRef = useRef(-1);
   const snapshottedTaskRef = useRef<string | null>(null);
+  const saveInFlightRef = useRef<Promise<void> | null>(null);
+  const saveRequestedRef = useRef(false);
+  const latestSaveStateRef = useRef<LatestSaveState>({
+    projectName,
+    revision,
+    viewport,
+    nodes,
+    annotations,
+    generationTask,
+    taskParentVersionId
+  });
+  const historyRef = useRef<CanvasHistoryState | null>(null);
+  const applyingHistoryRef = useRef(false);
+
+  latestSaveStateRef.current = {
+    projectName,
+    revision,
+    viewport,
+    nodes,
+    annotations,
+    generationTask,
+    taskParentVersionId
+  };
+
+  useEffect(() => () => {
+    browserImageCache.clear();
+    releaseAllCanvasAssetObjectUrls();
+  }, []);
 
   useEffect(() => {
     const closePromptPicker = (event: PointerEvent) => {
@@ -625,7 +687,7 @@ export function App({ projectName }: { projectName: string }) {
             const asset = assetMetadata.get(node.assetId);
             let source = displayCache.get(node.assetId);
             if (!source) {
-              source = readCanvasAssetAsDataUrl(node.assetId, asset?.display ? "display" : "original");
+              source = readCanvasAssetAsObjectUrl(node.assetId, asset?.display ? "display" : "original");
               displayCache.set(node.assetId, source);
             }
             return { ...node, src: await source };
@@ -654,59 +716,158 @@ export function App({ projectName }: { projectName: string }) {
     return () => { cancelled = true; };
   }, [projectLoaded, serviceState]);
 
-  useEffect(() => {
-    if (serviceState !== "connected" || !projectLoaded) return;
-    const timer = window.setTimeout(() => {
-      void (async () => {
+  const saveProjectNow = useCallback(async () => {
+    if (saveInFlightRef.current) {
+      saveRequestedRef.current = true;
+      return saveInFlightRef.current;
+    }
+    const run = async () => {
+      do {
+        saveRequestedRef.current = false;
+        const snapshot = latestSaveStateRef.current;
         setSaveState("saving");
         try {
           const assets = await listCanvasAssets();
           const forceSnapshot = Boolean(
-            generationTask?.status === "completed"
-            && generationTask.id !== snapshottedTaskRef.current
+            snapshot.generationTask?.status === "completed"
+            && snapshot.generationTask.id !== snapshottedTaskRef.current
           );
           const project = buildCanvasProjectDocument({
             projectId: projectIdRef.current,
-            title: projectName,
+            title: snapshot.projectName,
             createdAt: projectCreatedAtRef.current,
-            revision,
-            viewport,
-            nodes,
-            annotations,
+            revision: snapshot.revision,
+            viewport: snapshot.viewport,
+            nodes: snapshot.nodes,
+            annotations: snapshot.annotations,
             assets,
-            generationTask,
-            taskParentVersionId
+            generationTask: snapshot.generationTask,
+            taskParentVersionId: snapshot.taskParentVersionId
           });
           await saveCanvasProject(project, forceSnapshot);
-          lastSavedRevisionRef.current = revision;
-          if (forceSnapshot && generationTask) snapshottedTaskRef.current = generationTask.id;
-          setSaveState("saved");
+          lastSavedRevisionRef.current = Math.max(lastSavedRevisionRef.current, snapshot.revision);
+          if (forceSnapshot && snapshot.generationTask) {
+            snapshottedTaskRef.current = snapshot.generationTask.id;
+          }
+          if (latestSaveStateRef.current.revision > snapshot.revision) {
+            saveRequestedRef.current = true;
+          }
         } catch (error) {
           setSaveState("error");
           setNotice(error instanceof Error ? `自动保存失败：${error.message}` : "自动保存失败");
+          return;
         }
-      })();
-    }, 500);
+      } while (saveRequestedRef.current);
+      setSaveState("saved");
+    };
+    const pending = run().finally(() => {
+      saveInFlightRef.current = null;
+    });
+    saveInFlightRef.current = pending;
+    return pending;
+  }, []);
+
+  useEffect(() => {
+    if (serviceState !== "connected" || !projectLoaded) return;
+    const timer = window.setTimeout(() => {
+      saveRequestedRef.current = true;
+      void saveProjectNow();
+    }, 350);
     return () => window.clearTimeout(timer);
   }, [
     annotations,
     generationTask?.id,
     generationTask?.status,
     nodes,
-    projectName,
     projectLoaded,
     revision,
+    saveProjectNow,
     serviceState,
     taskParentVersionId,
     viewport
   ]);
 
   useEffect(() => {
+    const flushWhenHidden = () => {
+      if (document.visibilityState !== "hidden" || !projectLoaded || serviceState !== "connected") return;
+      saveRequestedRef.current = true;
+      void saveProjectNow();
+    };
+    const warnBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (!projectLoaded || latestSaveStateRef.current.revision <= lastSavedRevisionRef.current) return;
+      saveRequestedRef.current = true;
+      void saveProjectNow();
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    document.addEventListener("visibilitychange", flushWhenHidden);
+    window.addEventListener("beforeunload", warnBeforeUnload);
+    return () => {
+      document.removeEventListener("visibilitychange", flushWhenHidden);
+      window.removeEventListener("beforeunload", warnBeforeUnload);
+    };
+  }, [projectLoaded, saveProjectNow, serviceState]);
+
+  useEffect(() => {
+    if (!projectLoaded) return;
+    if (applyingHistoryRef.current) {
+      applyingHistoryRef.current = false;
+      return;
+    }
+    const snapshot: CanvasHistorySnapshot = {
+      nodes,
+      annotations,
+      structureBaseId,
+      styleReferenceId,
+      taskInstruction
+    };
+    historyRef.current = historyRef.current
+      ? pushCanvasHistory(historyRef.current, snapshot)
+      : createCanvasHistory(snapshot);
+    setHistoryVersion((current) => current + 1);
+  }, [projectLoaded, revision]);
+
+  const applyHistory = useCallback((direction: -1 | 1) => {
+    const history = historyRef.current;
+    if (!history) return;
+    const moved = moveCanvasHistory(history, direction);
+    if (!moved.snapshot) return;
+    historyRef.current = moved.state;
+    applyingHistoryRef.current = true;
+    setNodes(moved.snapshot.nodes);
+    setAnnotations(moved.snapshot.annotations);
+    setStructureBaseId(moved.snapshot.structureBaseId);
+    setStyleReferenceId(moved.snapshot.styleReferenceId);
+    setTaskInstruction(moved.snapshot.taskInstruction);
+    setSelectedId(null);
+    setSelectedAnnotationId(null);
+    setRevision((current) => current + 1);
+    setHistoryVersion((current) => current + 1);
+    setNotice(direction === -1 ? "已撤销上一步画布修改。" : "已重做画布修改。");
+  }, []);
+
+  const history = historyRef.current;
+  const canUndo = Boolean(history && history.cursor > 0);
+  const canRedo = Boolean(history && history.cursor < history.entries.length - 1);
+  void historyVersion;
+
+  useEffect(() => {
     if (!generationTask || isTerminalStatus(generationTask.status)) return;
+    let failures = 0;
     const timer = window.setInterval(() => {
       void readGenerationTask(generationTask.id)
-        .then(setGenerationTask)
-        .catch(() => undefined);
+        .then((task) => {
+          failures = 0;
+          setGenerationTask(task);
+        })
+        .catch((error: unknown) => {
+          failures += 1;
+          if (failures < 2) return;
+          setServiceState("offline");
+          setNotice(error instanceof Error
+            ? `任务状态读取失败：${error.message}`
+            : "任务状态读取失败，请重新连接本地服务。");
+        });
     }, 1_500);
     return () => window.clearInterval(timer);
   }, [generationTask?.id, generationTask?.status]);
@@ -782,7 +943,6 @@ export function App({ projectName }: { projectName: string }) {
     }
     setAnnotations((current) => [...current, next]);
     setSelectedAnnotationId(id);
-    setRevision((current) => current + 1);
     setDrawingId(id);
   }, [canvasPoint, selectedNode, tool]);
 
@@ -926,6 +1086,7 @@ export function App({ projectName }: { projectName: string }) {
     }
     setDrawingId(null);
     setTool("select");
+    if (kept) setRevision((currentRevision) => currentRevision + 1);
     setNotice(kept
       ? "批注已建立；可直接写修改意见并加入右侧修改要求。"
       : "批注范围过小，未保存。");
@@ -948,6 +1109,7 @@ export function App({ projectName }: { projectName: string }) {
     const removedId = selectedNode.id;
     const removedVersionId = selectedNode.versionId;
     const removedName = selectedNode.name;
+    browserImageCache.delete(selectedNode.src);
     setNodes((current) => removeImageNode(current, removedId));
     setSelectedId(null);
     setStructureBaseId((current) => current === removedId ? null : current);
@@ -960,11 +1122,44 @@ export function App({ projectName }: { projectName: string }) {
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
+      const editableTarget = Boolean(
+        target?.matches("input, textarea, select, button")
+        || target?.isContentEditable
+      );
+      const key = event.key.toLowerCase();
+      if (!editableTarget && (event.ctrlKey || event.metaKey) && !event.altKey) {
+        if (key === "z") {
+          event.preventDefault();
+          applyHistory(event.shiftKey ? 1 : -1);
+          return;
+        }
+        if (key === "y") {
+          event.preventDefault();
+          applyHistory(1);
+          return;
+        }
+      }
+      if (!editableTarget && ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) {
+        const distance = event.shiftKey ? 10 : 1;
+        const dx = event.key === "ArrowLeft" ? -distance : event.key === "ArrowRight" ? distance : 0;
+        const dy = event.key === "ArrowUp" ? -distance : event.key === "ArrowDown" ? distance : 0;
+        if (selectedAnnotation) {
+          event.preventDefault();
+          updateAnnotation({
+            ...selectedAnnotation,
+            x: selectedAnnotation.x + dx,
+            y: selectedAnnotation.y + dy
+          });
+          return;
+        }
+        if (selectedNode) {
+          event.preventDefault();
+          updateNode({ ...selectedNode, x: selectedNode.x + dx, y: selectedNode.y + dy });
+          return;
+        }
+      }
       const action = canvasKeyboardAction(event.key, {
-        editableTarget: Boolean(
-          target?.matches("input, textarea, select, button")
-          || target?.isContentEditable
-        ),
+        editableTarget,
         hasSelectedAnnotation: Boolean(selectedAnnotationId),
         hasSelectedImage: Boolean(selectedId),
         modifierPressed: event.ctrlKey || event.metaKey || event.altKey
@@ -980,7 +1175,6 @@ export function App({ projectName }: { projectName: string }) {
         if (drawingId) {
           setAnnotations((current) => current.filter((annotation) => annotation.id !== drawingId));
           setDrawingId(null);
-          setRevision((current) => current + 1);
         }
         setSelectedAnnotationId(null);
         setTool("select");
@@ -1004,7 +1198,20 @@ export function App({ projectName }: { projectName: string }) {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [cancelTextEditor, deleteSelectedAnnotation, deleteSelectedImage, drawingId, selectedAnnotationId, selectedId, textEditor]);
+  }, [
+    applyHistory,
+    cancelTextEditor,
+    deleteSelectedAnnotation,
+    deleteSelectedImage,
+    drawingId,
+    selectedAnnotation,
+    selectedAnnotationId,
+    selectedId,
+    selectedNode,
+    textEditor,
+    updateAnnotation,
+    updateNode
+  ]);
 
   const exportAnnotationImage = useCallback(async () => {
     if (!selectedNode || exporting) return;
@@ -1065,7 +1272,7 @@ export function App({ projectName }: { projectName: string }) {
         if (imported.deduplicated) reusedAssets += 1;
         let displaySrc = dataUrl;
         if (imported.asset.display) {
-          displaySrc = await readCanvasAssetAsDataUrl(imported.asset.id, "display");
+          displaySrc = await readCanvasAssetAsObjectUrl(imported.asset.id, "display");
         } else {
           const derivatives = await createImageDerivatives(dataUrl);
           await saveCanvasAssetDerivatives(
@@ -1073,7 +1280,7 @@ export function App({ projectName }: { projectName: string }) {
             derivatives.displayDataUrl,
             derivatives.thumbnailDataUrl
           );
-          displaySrc = derivatives.displayDataUrl;
+          displaySrc = await readCanvasAssetAsObjectUrl(imported.asset.id, "display");
         }
         const frame = fitImportedImage(imported.asset.original.width, imported.asset.original.height);
         const id = `node_${crypto.randomUUID()}` as const;
@@ -1287,6 +1494,30 @@ export function App({ projectName }: { projectName: string }) {
     taskPreview
   ]);
 
+  const cancelActiveTask = useCallback(async () => {
+    if (!generationTask || isTerminalStatus(generationTask.status) || cancellingTask) return;
+    const alreadySubmitted = ["submitted", "generating", "collecting", "returning"].includes(generationTask.status);
+    const confirmed = window.confirm(alreadySubmitted
+      ? "这会结束本地任务跟踪并允许切换项目，但无法撤回已经发送给 ChatGPT 的内容。确定继续吗？"
+      : "确定取消当前任务吗？尚未提交的附件和提示词不会发送。");
+    if (!confirmed) return;
+    setCancellingTask(true);
+    try {
+      const cancelled = await cancelGenerationTask(generationTask.id);
+      automationRunTaskRef.current = null;
+      document.documentElement.removeAttribute("data-gpt-canvas-task-id");
+      setGenerationTask(cancelled);
+      setRevision((current) => current + 1);
+      setNotice(alreadySubmitted
+        ? "已结束本地任务跟踪；已经发送到 ChatGPT 的生成可能仍会继续。"
+        : "任务已取消，现在可以修改输入或切换项目。");
+    } catch (error) {
+      setNotice(error instanceof Error ? `任务取消失败：${error.message}` : "任务取消失败");
+    } finally {
+      setCancellingTask(false);
+    }
+  }, [cancellingTask, generationTask]);
+
   const returnResultsToCanvas = useCallback(async () => {
     if (!generationTask || !generationTask.results.length || returningResults || returnInFlightRef.current) return;
     const parent = nodes.find((node) => node.versionId === taskParentVersionId) ?? structureBase;
@@ -1323,7 +1554,7 @@ export function App({ projectName }: { projectName: string }) {
           parentVersionId: parent?.versionId ?? null,
           taskId: generationTask.id,
           name: result.filename,
-          src: derivatives.displayDataUrl,
+          src: await readCanvasAssetAsObjectUrl(imported.asset.id, "display"),
           sourceWidth: imported.asset.original.width,
           sourceHeight: imported.asset.original.height,
           x: 0,
@@ -1404,14 +1635,49 @@ export function App({ projectName }: { projectName: string }) {
     }];
   }), [nodes]);
 
+  const visibleImageNodeIds = useMemo(() => {
+    const margin = 320 / viewport.scale;
+    const left = -viewport.x / viewport.scale - margin;
+    const top = -viewport.y / viewport.scale - margin;
+    const right = left + size.width / viewport.scale + margin * 2;
+    const bottom = top + size.height / viewport.scale + margin * 2;
+    return new Set(nodes
+      .filter((node) => (
+        node.x + node.width >= left
+        && node.x <= right
+        && node.y + node.height >= top
+        && node.y <= bottom
+      ))
+      .map((node) => node.id));
+  }, [nodes, size.height, size.width, viewport]);
+
   return (
     <div className="app-shell">
       <a className="skip-link" href="#canvas-main">跳到画布</a>
 
       <aside className="tool-rail" aria-label="画布工具">
+        <input
+          ref={imageInputRef}
+          className="visually-hidden"
+          type="file"
+          multiple
+          accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp"
+          onChange={(event) => {
+            void importFiles(Array.from(event.target.files ?? []));
+            event.target.value = "";
+          }}
+        />
         <div className="tool-button-grid tool-command-grid">
           <RailCommandButton glyph="←" label="项目" onClick={() => window.location.reload()} />
+          <RailCommandButton
+            glyph="+"
+            label="导入"
+            disabled={serviceState !== "connected" || importing}
+            onClick={() => imageInputRef.current?.click()}
+          />
           <RailCommandButton glyph="□" label="整理" disabled={nodes.length < 2} onClick={tidyFrames} />
+          <RailCommandButton glyph="↶" label="撤销" disabled={!canUndo} onClick={() => applyHistory(-1)} />
+          <RailCommandButton glyph="↷" label="重做" disabled={!canRedo} onClick={() => applyHistory(1)} />
         </div>
         <div className="tool-rail-divider" aria-hidden="true" />
         <div className="tool-button-grid">
@@ -1427,7 +1693,9 @@ export function App({ projectName }: { projectName: string }) {
         className="canvas-region"
         data-middle-panning={middlePanning || undefined}
         ref={canvasRef}
+        tabIndex={0}
         aria-label="无限画布"
+        aria-describedby="canvas-status"
         onAuxClick={(event) => {
           if (isMiddleMouseButton(event.button)) event.preventDefault();
         }}
@@ -1505,6 +1773,7 @@ export function App({ projectName }: { projectName: string }) {
                 node={node}
                 selected={selectedId === node.id && !selectedAnnotationId}
                 selectable={tool === "select"}
+                loadImage={selectedId === node.id || visibleImageNodeIds.has(node.id)}
                 viewportScale={viewport.scale}
                 roleLabel={
                   structureBaseId === node.id
@@ -1607,7 +1876,13 @@ export function App({ projectName }: { projectName: string }) {
           </form>
         )}
 
-        <div className="canvas-notice" data-tone={serviceState === "offline" ? "error" : "info"}>
+        <div
+          id="canvas-status"
+          className="canvas-notice"
+          role="status"
+          aria-live="polite"
+          data-tone={serviceState === "offline" ? "error" : "info"}
+        >
           <span>{notice}</span>
           {serviceState === "offline" && <button onClick={() => void connectService()}>重新连接</button>}
         </div>
@@ -1626,6 +1901,26 @@ export function App({ projectName }: { projectName: string }) {
           >
             {selectedNode?.name ?? "未选择图片"}
           </p>
+          <label className="visually-hidden" htmlFor="canvas-node-select">选择画布图片</label>
+          <select
+            id="canvas-node-select"
+            className="node-select"
+            value={selectedId ?? ""}
+            disabled={!nodes.length}
+            onChange={(event) => {
+              setSelectedId(event.target.value || null);
+              setSelectedAnnotationId(null);
+              const node = nodes.find((item) => item.id === event.target.value);
+              if (node) setNotice(`已通过列表选择“${node.name}”；方向键可移动，Shift + 方向键每次移动 10。`);
+            }}
+          >
+            <option value="">{nodes.length ? "选择一张图片…" : "暂无图片"}</option>
+            {nodes.map((node, index) => (
+              <option key={node.id} value={node.id}>
+                {String(index + 1).padStart(2, "0")} · {node.name}
+              </option>
+            ))}
+          </select>
           <div className="role-options" role="group" aria-label="当前图片的任务角色">
             <button
               aria-pressed={Boolean(selectedNode && structureBaseId === selectedNode.id)}
@@ -1831,11 +2126,21 @@ export function App({ projectName }: { projectName: string }) {
           </details>
 
           {generationActive && generationTask ? (
-            <p className="generation-progress" data-needs-user={generationTask.status === "needs-user" || undefined}>
-              {generationTask.status === "needs-user"
-                ? "登录或网页验证需要处理，系统已切换到 ChatGPT。"
-                : "后台生成中，完成后结果会自动回到画布。"}
-            </p>
+            <div className="generation-active">
+              <p className="generation-progress" data-needs-user={generationTask.status === "needs-user" || undefined}>
+                {generationTask.status === "needs-user"
+                  ? "登录或网页验证需要处理。可以继续人工处理，也可以结束本地任务。"
+                  : "后台生成中，完成后结果会自动回到画布。"}
+              </p>
+              <button
+                type="button"
+                className="task-cancel"
+                disabled={cancellingTask}
+                onClick={() => void cancelActiveTask()}
+              >
+                {cancellingTask ? "正在结束…" : "结束当前任务"}
+              </button>
+            </div>
           ) : (
             <>
               <button

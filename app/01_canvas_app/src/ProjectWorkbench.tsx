@@ -73,14 +73,17 @@ export function ProjectWorkbench({ onOpen }: ProjectWorkbenchProps) {
   const create = async (event: FormEvent) => {
     event.preventDefault();
     const projectName = name.trim();
-    if (!projectName || !requirementsPreview || !requirementsContent || creating || busyProjectId) return;
+    if (!projectName || creating || busyProjectId) return;
     setCreating(true);
     setError("");
     try {
-      const project = await createWorkbenchProject(projectName, {
-        sourceName: requirementsPreview.sourceName,
-        content: requirementsContent
-      });
+      const requirements = requirementsPreview && requirementsContent
+        ? {
+            sourceName: requirementsPreview.sourceName,
+            content: requirementsContent
+          }
+        : undefined;
+      const project = await createWorkbenchProject(projectName, requirements);
       onOpen(await activateWorkbenchProject(project.id));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "项目创建失败");
@@ -144,7 +147,7 @@ export function ProjectWorkbench({ onOpen }: ProjectWorkbenchProps) {
               <span>NEW PROJECT</span>
               <strong>新建项目</strong>
             </div>
-            <small>项目需求 Markdown 是背景资料的唯一入口</small>
+            <small>可直接建立空白画布，也可先导入项目需求</small>
           </div>
           <label htmlFor="new-project-name">项目名称</label>
           <div className="project-name-entry">
@@ -184,7 +187,7 @@ export function ProjectWorkbench({ onOpen }: ProjectWorkbenchProps) {
                 <small>
                   {requirementsPreview
                     ? `${requirementsPreview.characterCount.toLocaleString("zh-CN")} 字符 · 识别 ${requirementsPreview.recognizedSectionCount} 个章节`
-                    : "拖入文件，或从电脑中选择 .md / .markdown"}
+                    : "可选：拖入文件，或从电脑中选择 .md / .markdown"}
                 </small>
               </div>
               <button
@@ -222,13 +225,17 @@ export function ProjectWorkbench({ onOpen }: ProjectWorkbenchProps) {
             <span>
               {requirementsPreview
                 ? "确认后复制源文件，并生成项目级背景与约束上下文。"
-                : "先上传项目需求 Markdown，提取结果确认后才能创建。"}
+                : "无需准备需求文档，也可以先创建空白项目并导入图片。"}
             </span>
             <button
               type="submit"
-              disabled={!name.trim() || !requirementsPreview || !requirementsContent || creating}
+              disabled={!name.trim() || creating}
             >
-              {creating ? "正在创建…" : "确认并进入"}
+              {creating
+                ? "正在创建…"
+                : requirementsPreview
+                  ? "带项目背景创建"
+                  : "创建空白项目"}
             </button>
           </div>
         </form>

@@ -135,7 +135,7 @@ export async function previewProjectRequirements(file: File): Promise<{
 
 export async function createWorkbenchProject(
   name: string,
-  requirements: { sourceName: string; content: string }
+  requirements?: { sourceName: string; content: string }
 ): Promise<WorkbenchProject> {
   const response = await authenticatedFetch("/api/v1/workbench/projects", {
     method: "POST",
@@ -292,6 +292,25 @@ export async function readActiveGenerationTask(): Promise<GenerationTask | null>
   return body.task ?? null;
 }
 
+export async function cancelGenerationTask(taskId: string): Promise<GenerationTask> {
+  const response = await authenticatedFetch(
+    `/api/v1/tasks/${encodeURIComponent(taskId)}/status`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        status: "cancelled",
+        by: "user",
+        note: "用户从画布结束本地任务"
+      })
+    }
+  );
+  if (!response.ok) throw await apiError(response);
+  const body = await response.json() as { task?: GenerationTask };
+  if (!body.task) throw new Error("本地服务未返回已取消任务");
+  return body.task;
+}
+
 export async function readGenerationResultAsDataUrl(taskId: string, resultId: string): Promise<string> {
   const response = await authenticatedFetch(
     `/api/v1/tasks/${encodeURIComponent(taskId)}/results/${encodeURIComponent(resultId)}`
@@ -332,6 +351,31 @@ export async function readCanvasAssetAsDataUrl(
       : reject(new Error("无法读取画布资产"));
     reader.readAsDataURL(blob);
   });
+}
+
+const managedCanvasObjectUrls = new Set<string>();
+
+export async function readCanvasAssetAsObjectUrl(
+  assetId: string,
+  rendition: "original" | "display" | "thumbnail" = "display"
+): Promise<string> {
+  const response = await authenticatedFetch(
+    `/api/v1/canvas/assets/${encodeURIComponent(assetId)}/${rendition}`
+  );
+  if (!response.ok) throw await apiError(response);
+  const url = URL.createObjectURL(await response.blob());
+  managedCanvasObjectUrls.add(url);
+  return url;
+}
+
+export function releaseCanvasAssetObjectUrl(url: string): void {
+  if (!managedCanvasObjectUrls.delete(url)) return;
+  URL.revokeObjectURL(url);
+}
+
+export function releaseAllCanvasAssetObjectUrls(): void {
+  for (const url of managedCanvasObjectUrls) URL.revokeObjectURL(url);
+  managedCanvasObjectUrls.clear();
 }
 
 export async function saveCanvasAssetDerivatives(

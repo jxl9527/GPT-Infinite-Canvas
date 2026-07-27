@@ -18,6 +18,7 @@ app/output/
 
 # Local release artifacts
 releases/
+output/
 *.zip
 
 # Legacy local folders retained only for recovery; never publish

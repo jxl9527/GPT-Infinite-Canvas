@@ -220,15 +220,14 @@ export class ProjectRuntimeManager {
 
   async create(nameValue: unknown, requirementsValue: unknown): Promise<WorkbenchProject> {
     const name = normalizeProjectName(nameValue);
-    if (
-      typeof requirementsValue !== "object"
-      || requirementsValue === null
-      || Array.isArray(requirementsValue)
-    ) {
-      throw new ProtocolError("INVALID_INPUT", "请先上传并确认项目需求 Markdown");
+    let parsed: ReturnType<typeof parseProjectRequirements> | null = null;
+    if (requirementsValue !== undefined && requirementsValue !== null) {
+      if (typeof requirementsValue !== "object" || Array.isArray(requirementsValue)) {
+        throw new ProtocolError("INVALID_INPUT", "项目需求必须是 Markdown 文件内容");
+      }
+      const requirementsRecord = requirementsValue as Record<string, unknown>;
+      parsed = parseProjectRequirements(requirementsRecord.sourceName, requirementsRecord.content);
     }
-    const requirementsRecord = requirementsValue as Record<string, unknown>;
-    const parsed = parseProjectRequirements(requirementsRecord.sourceName, requirementsRecord.content);
     const id = `project_${randomUUID()}`;
     const createdAt = new Date().toISOString();
     const projectRoot = resolve(this.projectsRoot, id);
@@ -243,60 +242,64 @@ export class ProjectRuntimeManager {
     const sourceRelativePath = "inputs/requirements/项目需求_v1.md";
     const contextRelativePath = "context/project-context.json";
     const generationContextRelativePath = "context/generation-context.md";
-    const requirementsReference: ProjectRequirementsReference = {
-      sourceName: parsed.preview.sourceName,
-      sourceRelativePath,
-      contextRelativePath,
-      generationContextRelativePath,
-      sha256: createHash("sha256").update(parsed.content, "utf8").digest("hex"),
-      importedAt,
-      title: parsed.preview.title,
-      summary: parsed.preview.summary,
-      sectionCount: parsed.preview.recognizedSectionCount
-    };
+    const requirementsReference: ProjectRequirementsReference | null = parsed
+      ? {
+          sourceName: parsed.preview.sourceName,
+          sourceRelativePath,
+          contextRelativePath,
+          generationContextRelativePath,
+          sha256: createHash("sha256").update(parsed.content, "utf8").digest("hex"),
+          importedAt,
+          title: parsed.preview.title,
+          summary: parsed.preview.summary,
+          sectionCount: parsed.preview.recognizedSectionCount
+        }
+      : null;
     const metadata: ProjectMetadata = {
       schemaVersion: "1.0",
       id,
       name,
-      createdAt,
-      requirements: requirementsReference
+      createdAt
     };
+    if (requirementsReference) metadata.requirements = requirementsReference;
     try {
-      await mkdir(join(stagingRoot, "inputs", "requirements"), { recursive: true });
-      await mkdir(join(stagingRoot, "context"), { recursive: true });
       await mkdir(join(stagingRoot, "logs"), { recursive: true });
-      await writeFile(join(stagingRoot, sourceRelativePath), parsed.content, { encoding: "utf8", flag: "wx" });
-      await writeFile(
-        join(stagingRoot, contextRelativePath),
-        `${JSON.stringify({
-          schemaVersion: "1.0",
-          sourceName: parsed.preview.sourceName,
-          importedAt,
-          title: parsed.preview.title,
-          projectName: name,
-          summary: parsed.preview.summary,
-          generationContext: parsed.preview.generationContext,
-          sections: parsed.preview.sections,
-          missingRecommended: parsed.preview.missingRecommended
-        }, null, 2)}\n`,
-        { encoding: "utf8", flag: "wx" }
-      );
-      await writeFile(
-        join(stagingRoot, generationContextRelativePath),
-        `${parsed.preview.generationContext}\n`,
-        { encoding: "utf8", flag: "wx" }
-      );
-      await writeFile(
-        join(stagingRoot, "logs", "requirements-import.ndjson"),
-        `${JSON.stringify({
-          at: importedAt,
-          action: "requirements-imported",
-          sourceName: parsed.preview.sourceName,
-          sha256: requirementsReference.sha256,
-          recognizedSectionCount: parsed.preview.recognizedSectionCount
-        })}\n`,
-        { encoding: "utf8", flag: "wx" }
-      );
+      if (parsed && requirementsReference) {
+        await mkdir(join(stagingRoot, "inputs", "requirements"), { recursive: true });
+        await mkdir(join(stagingRoot, "context"), { recursive: true });
+        await writeFile(join(stagingRoot, sourceRelativePath), parsed.content, { encoding: "utf8", flag: "wx" });
+        await writeFile(
+          join(stagingRoot, contextRelativePath),
+          `${JSON.stringify({
+            schemaVersion: "1.0",
+            sourceName: parsed.preview.sourceName,
+            importedAt,
+            title: parsed.preview.title,
+            projectName: name,
+            summary: parsed.preview.summary,
+            generationContext: parsed.preview.generationContext,
+            sections: parsed.preview.sections,
+            missingRecommended: parsed.preview.missingRecommended
+          }, null, 2)}\n`,
+          { encoding: "utf8", flag: "wx" }
+        );
+        await writeFile(
+          join(stagingRoot, generationContextRelativePath),
+          `${parsed.preview.generationContext}\n`,
+          { encoding: "utf8", flag: "wx" }
+        );
+        await writeFile(
+          join(stagingRoot, "logs", "requirements-import.ndjson"),
+          `${JSON.stringify({
+            at: importedAt,
+            action: "requirements-imported",
+            sourceName: parsed.preview.sourceName,
+            sha256: requirementsReference.sha256,
+            recognizedSectionCount: parsed.preview.recognizedSectionCount
+          })}\n`,
+          { encoding: "utf8", flag: "wx" }
+        );
+      }
       await writeFile(
         join(stagingRoot, "project-meta.json"),
         `${JSON.stringify(metadata, null, 2)}\n`,
@@ -316,13 +319,15 @@ export class ProjectRuntimeManager {
       imageNodes: 0,
       annotations: 0,
       relativeLocation: `projects/${id}`,
-      requirements: {
-        sourceName: requirementsReference.sourceName,
-        importedAt,
-        title: requirementsReference.title,
-        summary: requirementsReference.summary,
-        sectionCount: requirementsReference.sectionCount
-      }
+      requirements: requirementsReference
+        ? {
+            sourceName: requirementsReference.sourceName,
+            importedAt,
+            title: requirementsReference.title,
+            summary: requirementsReference.summary,
+            sectionCount: requirementsReference.sectionCount
+          }
+        : null
     };
   }
 

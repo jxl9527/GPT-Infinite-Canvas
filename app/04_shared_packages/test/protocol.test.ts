@@ -10,6 +10,9 @@ import {
 
 test("状态机禁止已提交任务回退和终态变化", () => {
   assert.equal(canTransition("submitted", "ready-to-submit"), false);
+  assert.equal(canTransition("submitted", "cancelled"), true);
+  assert.equal(canTransition("generating", "cancelled"), true);
+  assert.equal(canTransition("collecting", "cancelled"), true);
   assert.equal(canTransition("ready-to-submit", "uploading"), true);
   for (const terminal of ["completed", "failed", "cancelled"] as const) {
     assert.equal(isTerminalStatus(terminal), true);

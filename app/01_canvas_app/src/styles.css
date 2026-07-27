@@ -1561,3 +1561,161 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent-light); 
     left: 4.65rem;
   }
 }
+
+/* Reliable editing, keyboard access and narrow-window adaptation */
+.app-shell {
+  min-width: 0;
+}
+
+.canvas-region:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.node-select {
+  width: 100%;
+  min-height: 2.75rem;
+  margin: 0 0 .55rem;
+  padding: 0 .65rem;
+  overflow: hidden;
+  border: 1px solid var(--rule);
+  color: var(--ink);
+  background: var(--paper);
+  font-size: .68rem;
+  text-overflow: ellipsis;
+}
+
+.generation-active {
+  display: grid;
+  gap: .45rem;
+}
+
+.generation-active .generation-progress {
+  margin-bottom: 0;
+}
+
+.task-cancel {
+  min-height: 2.75rem;
+  border: 1px solid color-mix(in oklch, var(--accent) 55%, var(--rule));
+  color: var(--accent);
+  background: transparent;
+  cursor: pointer;
+}
+
+.task-cancel:hover:not(:disabled) {
+  color: var(--paper);
+  background: var(--accent);
+}
+
+@media (max-width: 56rem) {
+  .app-shell {
+    height: 100dvh;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(22rem, 58dvh) minmax(18rem, 42dvh);
+    grid-template-areas:
+      "canvas"
+      "inspector";
+  }
+
+  .tool-rail {
+    top: .75rem;
+    bottom: auto;
+    max-height: calc(58dvh - 1.5rem);
+    overflow-y: auto;
+    transform: none;
+  }
+
+  .canvas-notice {
+    top: .75rem;
+    left: 4.75rem;
+    max-width: calc(100% - 5.5rem);
+  }
+
+  .canvas-hud {
+    left: 4.75rem;
+  }
+
+  .inspector {
+    height: auto;
+    min-height: 0;
+    overflow: auto;
+    border-top: 1px solid var(--rule);
+    border-left: 0;
+  }
+
+  .inspector .task-section {
+    overflow: visible;
+  }
+}
+
+@media (max-width: 40rem) {
+  .workbench-intro {
+    padding: 2rem 1.25rem;
+  }
+
+  .project-ledger {
+    padding: 2rem 1rem;
+  }
+
+  .new-project-heading,
+  .new-project-submit {
+    align-items: stretch;
+    flex-direction: column;
+    gap: .75rem;
+  }
+
+  .new-project-heading small {
+    max-width: none;
+    text-align: left;
+  }
+
+  .requirements-picker-intro {
+    grid-template-columns: 2.25rem minmax(0, 1fr);
+  }
+
+  .requirements-select {
+    grid-column: 1 / -1;
+    min-height: 2.75rem;
+  }
+
+  .requirements-preview {
+    padding-left: 1rem;
+  }
+
+  .requirements-preview > div:first-child {
+    grid-template-columns: 1fr;
+  }
+
+  .project-row {
+    grid-template-columns: 2rem minmax(0, 1fr);
+    gap: .75rem;
+    padding: 1rem 0;
+  }
+
+  .project-row > button {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
+
+  .generation-mode,
+  .role-options {
+    grid-template-columns: 1fr;
+  }
+
+  .generation-mode button + button {
+    border-top: 1px solid var(--rule);
+    border-left: 0;
+  }
+
+  .canvas-notice {
+    font-size: .68rem;
+  }
+}
+
+@media (pointer: coarse) {
+  .node-select,
+  .task-cancel,
+  .requirements-select {
+    min-height: 2.75rem;
+  }
+}

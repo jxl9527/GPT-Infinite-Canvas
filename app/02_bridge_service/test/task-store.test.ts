@@ -76,6 +76,19 @@ test("服务重启后恢复未完成任务及已提交锁", async () => {
   await assert.rejects(() => recovered.create(input, []), (error) => error instanceof ProtocolError && error.code === "TASK_LOCKED");
 });
 
+test("用户可结束已提交任务并创建下一项任务", async () => {
+  const { store } = await temporaryStore();
+  const task = await store.create(input, []);
+  await store.claim(task.id, "test");
+  await store.transition(task.id, "ready-to-submit", "test");
+  await store.transition(task.id, "submitted", "test");
+  await store.transition(task.id, "generating", "test");
+  const cancelled = await store.transition(task.id, "cancelled", "user", "用户结束本地跟踪");
+  assert.equal(cancelled.status, "cancelled");
+  assert.equal(store.getActive(), undefined);
+  assert.ok(await store.create(input, []));
+});
+
 test("带提交记账的异常 ready-to-submit 状态不得回退重传附件", async () => {
   const { root, store } = await temporaryStore(); const task = await store.create(input, []);
   await store.claim(task.id, "test"); await store.transition(task.id, "ready-to-submit", "test");

@@ -294,8 +294,14 @@ test("v1 HTTP 完成附件读取、结果落盘去重、完成校验和脱敏诊
       (requirementsPreviewCall.json.preview as { projectNameSuggestion: string }).projectNameSuggestion,
       "空白产业园方案"
     );
-    const rejectedProjectCall = await post("/api/v1/workbench/projects", { name: "缺少需求文档" });
-    assert.equal(rejectedProjectCall.response.status, 422);
+    const blankProjectCall = await post("/api/v1/workbench/projects", { name: "快速空白项目" });
+    assert.equal(blankProjectCall.response.status, 201);
+    const blankProject = blankProjectCall.json.project as { id: string; requirements: null };
+    assert.equal(blankProject.requirements, null);
+    const blankMetadata = JSON.parse(
+      await readFile(join(root, ".runtime", "projects", blankProject.id, "project-meta.json"), "utf8")
+    ) as { requirements?: unknown };
+    assert.equal(blankMetadata.requirements, undefined);
     const createdProjectCall = await post("/api/v1/workbench/projects", {
       name: "空白产业园方案",
       requirements: { sourceName: "项目需求.md", content: requirementsMarkdown }
