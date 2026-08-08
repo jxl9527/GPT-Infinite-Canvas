@@ -10,7 +10,7 @@ test("可加载产物使用 P1 端口、共享协议副本和经典内容脚本"
   const manifest = JSON.parse(await readFile(resolve(root, "dist", "manifest.json"), "utf8")) as {
     version: string; host_permissions: string[]; content_scripts: Array<{ js: string[] }>;
   };
-  assert.equal(manifest.version, "1.5.16");
+  assert.equal(manifest.version, "1.5.20");
   assert.ok((manifest as { permissions?: string[] }).permissions?.includes("debugger"));
   assert.ok(manifest.host_permissions.includes("http://127.0.0.1:3220/*"));
   assert.ok(manifest.host_permissions.includes("http://127.0.0.1:3230/*"));
@@ -63,6 +63,11 @@ test("提交实现先锁定服务端 submitted，再点击网页按钮", async (
   assert.doesNotMatch(composerImplementation, /requestAnimationFrame/);
   assert.match(composerImplementation, /提示词完整性校验失败/);
   assert.match(source, /adapter\.isSendReady\(\)/);
+  assert.match(source, /waitForAttachmentCount\(0, 1_000\)/);
+  assert.match(source, /waitForAttachmentCount\(index \+ 1\)/);
+  assert.match(source, /submissionMarker = adapter\.submissionMarker/);
+  assert.match(source, /waitForSubmissionStart\(submissionMarker\)/);
+  assert.match(source, /提示词与 \$\{bridge\.task\.attachments\.length\} 张附件已在可见页面确认/);
   const flowAdapter = await readFile(resolve(root, "dist", "content", "flow-adapter.js"), "utf8");
   assert.match(flowAdapter, /selectOutputCount/);
   assert.match(flowAdapter, /Google Flow 未确认 x/);
@@ -105,7 +110,15 @@ test("提交实现先锁定服务端 submitted，再点击网页按钮", async (
 
   const chatgptAdapter = await readFile(resolve(root, "dist", "content", "chatgpt-adapter.js"), "utf8");
   assert.match(chatgptAdapter, /latestTurn = turns\[turns\.length - 1\]/);
+  assert.match(chatgptAdapter, /isAssistantConversationTurn\(roles\)/);
+  assert.doesNotMatch(chatgptAdapter, /roles\.includes\("assistant"\)/);
   assert.match(chatgptAdapter, /isCollectableGeneratedImage/);
   assert.match(chatgptAdapter, /collectAssistantText/);
+  assert.match(chatgptAdapter, /attachmentRemove/);
+  assert.match(chatgptAdapter, /ChatGPT 附件确认超时/);
+  assert.match(chatgptAdapter, /ChatGPT 未确认发送/);
+  assert.match(chatgptAdapter, /submissionMarker\(\)/);
+  assert.match(chatgptAdapter, /45_000/);
+  assert.match(chatgptAdapter, /未出现新对话轮次/);
   assert.doesNotMatch(chatgptAdapter, /reverse\(\)\.find/);
 });

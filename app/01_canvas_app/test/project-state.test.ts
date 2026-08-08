@@ -41,6 +41,8 @@ const node: ImageNodeState = {
   outputRatio: "free"
 };
 
+const longPromptText = `【最终生成提示词】\n${"保持建筑结构、道路关系和原始视角不变。".repeat(220)}`;
+
 test("项目保存与恢复保持节点、批注和版本引用", () => {
   const project = buildCanvasProjectDocument({
     projectId: "project_00000000-0000-0000-0000-000000000001",
@@ -64,14 +66,31 @@ test("项目保存与恢复保持节点、批注和版本引用", () => {
     taskParentVersionId: null,
     workflow: {
       activeViewpointId: "viewpoint_00000000-0000-0000-0000-000000000001",
-      batchRun: null,
+      batchRun: {
+        id: "batch_00000000-0000-0000-0000-000000000001",
+        status: "ready",
+        prompt: "批量提示词",
+        styleReferenceVersionId: null,
+        targetChatUrl: "",
+        items: [{
+          id: "batch_item_00000000-0000-0000-0000-000000000001",
+          sourceVersionId: node.versionId,
+          sourceName: node.name,
+          status: "queued",
+          taskId: null,
+          resultVersionIds: [],
+          error: ""
+        }],
+        createdAt: "2026-07-23T01:00:00.000Z",
+        updatedAt: "2026-07-23T01:00:00.000Z"
+      },
       customGptUrl: "https://chatgpt.com/g/g-architect-review",
       customGptEnabled: false,
       textCards: [{
         id: "text_card_00000000-0000-0000-0000-000000000001",
         kind: "prompt",
         title: "1人视｜生成提示词",
-        text: "【最终生成提示词】\n保持建筑结构不变。",
+        text: longPromptText,
         x: 820,
         y: 234,
         width: 460,
@@ -108,7 +127,10 @@ test("项目保存与恢复保持节点、批注和版本引用", () => {
   assert.equal(restored.workflow.viewpoints[0]?.sourceVersionId, node.versionId);
   assert.equal(restored.workflow.customGptUrl, "https://chatgpt.com/g/g-architect-review");
   assert.equal(restored.workflow.customGptEnabled, false);
+  assert.equal(project.workflow?.batchRun?.targetChatUrl, null);
+  assert.equal(restored.workflow.batchRun?.targetChatUrl, null);
   assert.equal(restored.workflow.textCards[0]?.kind, "prompt");
+  assert.equal(restored.workflow.textCards[0]?.text, longPromptText);
   assert.equal(new Set(project.canvas.nodes.map((entry) => entry.id)).size, project.canvas.nodes.length);
   assert.match(project.canvas.nodes[1]?.id ?? "", /^node_annotation_/);
 });

@@ -27,7 +27,7 @@ test("历史图片基线只保存哈希并过滤重复源地址", async () => {
     digestSource(value: string): Promise<string>;
     filterNewSources(values: string[], baseline: Set<string>): Promise<string[]>;
     parseSrcset(value: string): string[];
-    isCollectableGeneratedImage(source: string, width: number, height: number): boolean;
+    isCollectableGeneratedImage(source: string, width: number, height: number, explicitlyGenerated?: boolean): boolean;
     detectSupportedImageMime(bytes: Uint8Array, declaredMime?: string): string | null;
     isAssistantConversationTurn(authorRoles: string[]): boolean;
     isFlowWorkspaceLaunchLabel(value: string): boolean;
@@ -44,6 +44,8 @@ test("历史图片基线只保存哈希并过滤重复源地址", async () => {
   assert.deepEqual(Array.from(await api.filterNewSources([oldUrl, oldUrl, newUrl], new Set([oldHash]))), [newUrl]);
   assert.deepEqual(Array.from(api.parseSrcset("a.png 1x, b.png 2x")), ["a.png", "b.png"]);
   assert.equal(api.isCollectableGeneratedImage("https://files.example/result.png", 1024, 768), true);
+  assert.equal(api.isCollectableGeneratedImage("https://chatgpt.com/backend-api/estuary/content?id=result", 0, 0, true), true);
+  assert.equal(api.isCollectableGeneratedImage("https://chatgpt.com/backend-api/estuary/content?id=result", 0, 0), false);
   assert.equal(api.isCollectableGeneratedImage("chrome-extension://example/icon.svg", 1024, 768), false);
   assert.equal(api.isCollectableGeneratedImage("https://files.example/icon.svg", 150, 150), false);
   assert.equal(api.detectSupportedImageMime(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), "application/octet-stream"), "image/png");
@@ -63,7 +65,7 @@ test("历史图片基线只保存哈希并过滤重复源地址", async () => {
   assert.equal(api.shouldAutoFill("ready-to-submit"), true);
   assert.equal(api.shouldAutoFill("submitted"), false);
   assert.equal(api.activationMode("needs-user"), "manual");
-  assert.equal(api.activationMode("needs-user", "2026-07-23T00:00:00.000Z"), "manual");
+  assert.equal(api.activationMode("needs-user", "2026-07-23T00:00:00.000Z"), "observe");
   assert.equal(api.activationMode("opening-chat"), "fill");
   assert.equal(api.activationMode("collecting"), "observe");
   assert.equal(api.preferredResponseKind("image", 0, 80), null);

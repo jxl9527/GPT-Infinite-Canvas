@@ -16,6 +16,23 @@ export interface CanvasTextCard {
   updatedAt: string;
 }
 
+export const TEXT_CARD_MIN_WIDTH = 320;
+export const TEXT_CARD_MIN_HEIGHT = 240;
+
+export function resizedTextCardSize(
+  width: number,
+  height: number,
+  deltaX: number,
+  deltaY: number,
+  scale = 1
+): { width: number; height: number } {
+  const safeScale = Number.isFinite(scale) && scale > 0 ? scale : 1;
+  return {
+    width: Math.max(TEXT_CARD_MIN_WIDTH, Math.round(width + deltaX / safeScale)),
+    height: Math.max(TEXT_CARD_MIN_HEIGHT, Math.round(height + deltaY / safeScale))
+  };
+}
+
 export function createCanvasTextCard(input: {
   kind: CanvasTextCardKind;
   title: string;

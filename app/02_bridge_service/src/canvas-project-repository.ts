@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { ProtocolError } from "@gpt-canvas/shared";
+import { MAX_VIEWPOINT_CONCLUSION_LENGTH, ProtocolError } from "@gpt-canvas/shared";
 
 type JsonObject = Record<string, unknown>;
 
@@ -145,7 +145,7 @@ function validateProject(value: unknown): JsonObject {
       boundedString(viewpoint.name, "viewpoint.name", 40);
       boundedString(viewpoint.purpose, "viewpoint.purpose", 100);
       boundedString(viewpoint.d5Batch, "viewpoint.d5Batch", 20);
-      boundedString(viewpoint.conclusion, "viewpoint.conclusion", 1_000);
+      boundedString(viewpoint.conclusion, "viewpoint.conclusion", MAX_VIEWPOINT_CONCLUSION_LENGTH);
       boundedString(viewpoint.nextAction, "viewpoint.nextAction", 600);
       requiredString(viewpoint.updatedAt, "viewpoint.updatedAt");
       for (const field of ["sourceVersionId", "selectedVersionId"] as const) {
@@ -175,7 +175,7 @@ function validateProject(value: unknown): JsonObject {
       handoffIds.add(handoff.id);
       boundedString(handoff.viewpointName, "handoff.viewpointName", 40);
       boundedString(handoff.d5Batch, "handoff.d5Batch", 20);
-      boundedString(handoff.conclusion, "handoff.conclusion", 1_000);
+      boundedString(handoff.conclusion, "handoff.conclusion", MAX_VIEWPOINT_CONCLUSION_LENGTH);
       boundedString(handoff.nextAction, "handoff.nextAction", 600);
       requiredString(handoff.createdAt, "handoff.createdAt");
       for (const field of ["sourceVersionId", "selectedVersionId"] as const) {
@@ -212,15 +212,17 @@ function validateProject(value: unknown): JsonObject {
       }
       if (batchRun.targetChatUrl !== undefined && batchRun.targetChatUrl !== null) {
         const targetChatUrl = boundedString(batchRun.targetChatUrl, "workflow.batchRun.targetChatUrl", 500);
-        let parsed: URL;
-        try { parsed = new URL(targetChatUrl); }
-        catch { throw new ProtocolError("INVALID_INPUT", "批量任务专属 GPT 地址无效"); }
-        if (
-          parsed.protocol !== "https:"
-          || (parsed.hostname !== "chatgpt.com" && parsed.hostname !== "chat.openai.com")
-          || !parsed.pathname.startsWith("/g/g-")
-        ) {
-          throw new ProtocolError("INVALID_INPUT", "批量任务专属 GPT 地址无效");
+        if (targetChatUrl) {
+          let parsed: URL;
+          try { parsed = new URL(targetChatUrl); }
+          catch { throw new ProtocolError("INVALID_INPUT", "批量任务专属 GPT 地址无效"); }
+          if (
+            parsed.protocol !== "https:"
+            || (parsed.hostname !== "chatgpt.com" && parsed.hostname !== "chat.openai.com")
+            || !parsed.pathname.startsWith("/g/g-")
+          ) {
+            throw new ProtocolError("INVALID_INPUT", "批量任务专属 GPT 地址无效");
+          }
         }
       }
       requiredString(batchRun.createdAt, "workflow.batchRun.createdAt");

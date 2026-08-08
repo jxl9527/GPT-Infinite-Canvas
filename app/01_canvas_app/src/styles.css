@@ -238,31 +238,140 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent-light); 
   pointer-events: none;
 }
 
+.canvas-generation-placeholder-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 9;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.generation-placeholder {
+  position: absolute;
+  container-type: size;
+  overflow: hidden;
+  min-width: 7.5rem;
+  min-height: 5rem;
+  border: 1px solid color-mix(in oklch, oklch(52% .12 242) 76%, var(--paper));
+  border-radius: .625rem;
+  box-shadow: 0 0 0 2px color-mix(in oklch, oklch(52% .12 242) 28%, transparent), 0 16px 34px rgb(30 34 38 / .18);
+  pointer-events: auto;
+  isolation: isolate;
+  animation: generation-placeholder-in 220ms var(--ease-out-quint);
+}
+
+.generation-placeholder-backdrop {
+  position: absolute;
+  inset: -7%;
+  z-index: -3;
+  background-position: center;
+  background-size: cover;
+  filter: blur(18px) saturate(.72) brightness(.72);
+  transform: scale(1.08);
+}
+
+.generation-placeholder-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: -2;
+  background: color-mix(in oklch, var(--rail) 52%, transparent);
+}
+
+.generation-placeholder-content {
+  position: absolute;
+  inset: 12% 8% 25%;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: .75rem;
+  color: color-mix(in oklch, var(--paper) 94%, oklch(88% .025 72));
+  text-align: center;
+  text-shadow: 0 1px 8px rgb(23 21 19 / .42);
+}
+
+.generation-placeholder-content strong {
+  font: 700 clamp(.75rem, 6cqh, 1rem)/1.3 "Microsoft YaHei UI", "PingFang SC", sans-serif;
+  letter-spacing: .04em;
+}
+
+.generation-placeholder-spinner {
+  width: clamp(1.5rem, 13cqh, 2.75rem);
+  aspect-ratio: 1;
+  border: 2px solid color-mix(in oklch, var(--paper) 34%, transparent);
+  border-top-color: color-mix(in oklch, var(--paper) 94%, oklch(72% .08 242));
+  border-radius: 50%;
+  animation: generation-placeholder-spin 900ms linear infinite;
+}
+
+.generation-placeholder-cancel {
+  position: absolute;
+  left: 50%;
+  bottom: clamp(.5rem, 7cqh, 1.25rem);
+  min-height: 2rem;
+  display: inline-flex;
+  align-items: center;
+  gap: .35rem;
+  padding: .38rem .75rem;
+  border: 1px solid color-mix(in oklch, var(--paper) 25%, transparent);
+  border-radius: 999px;
+  color: color-mix(in oklch, var(--paper) 94%, oklch(88% .025 72));
+  background: color-mix(in oklch, var(--rail) 82%, transparent);
+  box-shadow: 0 5px 14px rgb(23 21 19 / .2);
+  cursor: pointer;
+  font: 600 .72rem/1 "Microsoft YaHei UI", sans-serif;
+  transform: translateX(-50%);
+  transition: background-color 140ms var(--ease-out-quart), border-color 140ms var(--ease-out-quart), transform 140ms var(--ease-out-quart);
+}
+
+.generation-placeholder-cancel:hover:not(:disabled) {
+  border-color: color-mix(in oklch, var(--paper) 52%, transparent);
+  background: color-mix(in oklch, var(--accent) 76%, var(--rail));
+  transform: translateX(-50%) scale(1.025);
+}
+
+.generation-placeholder-cancel:active:not(:disabled) { transform: translateX(-50%) scale(.97); }
+.generation-placeholder-cancel:focus-visible { outline: 2px solid var(--paper); outline-offset: 2px; }
+.generation-placeholder-cancel:disabled { cursor: wait; opacity: .64; }
+
+@keyframes generation-placeholder-in {
+  from { opacity: 0; transform: translateX(.75rem) scale(.985); }
+  to { opacity: 1; transform: translateX(0) scale(1); }
+}
+
+@keyframes generation-placeholder-spin { to { transform: rotate(360deg); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .generation-placeholder { animation: none; }
+  .generation-placeholder-spinner { animation: none; border-top-color: currentColor; }
+  .generation-placeholder-cancel { transition: none; }
+}
+
 .canvas-text-card {
   position: absolute;
   transform-origin: top left;
   display: grid;
-  grid-template-rows: 3.4rem minmax(0, 1fr) 3.25rem;
+  grid-template-rows: 2.75rem minmax(0, 1fr) 2.625rem;
   overflow: hidden;
   border: 1px solid color-mix(in oklch, var(--ink) 30%, var(--paper));
+  border-radius: .625rem;
   color: var(--ink);
   background: color-mix(in oklch, var(--paper) 96%, var(--accent-light));
-  box-shadow: 0 16px 38px rgb(44 33 24 / .16);
+  box-shadow: 0 12px 30px rgb(44 33 24 / .14), 0 2px 7px rgb(44 33 24 / .07);
   pointer-events: auto;
   transition: box-shadow 140ms var(--ease-out-quart), border-color 140ms var(--ease-out-quart);
 }
 
 .canvas-text-card[data-selected="true"] {
   border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--accent), 0 18px 42px rgb(44 33 24 / .2);
+  box-shadow: 0 0 0 2px color-mix(in oklch, var(--accent) 86%, transparent), 0 16px 34px rgb(44 33 24 / .18);
 }
 
 .canvas-text-card > header {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) 2rem;
+  grid-template-columns: auto minmax(0, 1fr) 1.75rem;
   align-items: center;
-  gap: .65rem;
-  padding: .55rem .65rem .5rem .8rem;
+  gap: .5rem;
+  padding: .375rem .5rem .375rem .75rem;
   border-bottom: 1px solid var(--rule);
   background: color-mix(in oklch, var(--paper) 88%, var(--rail));
   cursor: grab;
@@ -275,32 +384,63 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent-light); 
 
 .canvas-text-card > header:active { cursor: grabbing; }
 .canvas-text-card > header > span { color: var(--accent); font: 700 .64rem/1 Bahnschrift, sans-serif; letter-spacing: .16em; }
-.canvas-text-card > header input { min-width: 0; border: 0; color: var(--ink); background: transparent; font: 700 .92rem/1.35 "Microsoft YaHei UI", "PingFang SC", sans-serif; }
-.canvas-text-card > header input:focus { outline: 1px solid var(--accent); outline-offset: 3px; }
-.canvas-text-card > header button { width: 2rem; height: 2rem; border: 0; color: var(--ink-soft); background: transparent; cursor: pointer; font-size: 1.2rem; }
+.canvas-text-card > header strong { min-width: 0; overflow: hidden; color: var(--ink); font: 700 .86rem/1.3 "Microsoft YaHei UI", "PingFang SC", sans-serif; text-overflow: ellipsis; white-space: nowrap; }
+.canvas-text-card > header button { width: 1.75rem; height: 1.75rem; border: 0; border-radius: 50%; color: var(--ink-soft); background: transparent; cursor: pointer; font-size: 1.05rem; }
 .canvas-text-card > header button:hover { color: var(--paper); background: var(--accent); }
 
 .canvas-text-card > textarea {
   width: 100%;
   min-height: 0;
   resize: none;
-  padding: 1rem 1.05rem;
+  padding: .75rem .875rem .875rem;
   border: 0;
   outline: 0;
   color: var(--ink);
   background: transparent;
-  font: 500 .83rem/1.72 "Microsoft YaHei UI", "PingFang SC", sans-serif;
+  font: 500 .83rem/1.68 "Microsoft YaHei UI", "PingFang SC", sans-serif;
   white-space: pre-wrap;
   scrollbar-color: var(--rule-strong) transparent;
 }
 
 .canvas-text-card > textarea:focus { box-shadow: inset 0 0 0 2px color-mix(in oklch, var(--accent) 42%, transparent); }
 .canvas-text-card > footer { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-top: 1px solid var(--rule); background: var(--paper); }
-.canvas-text-card > footer button { min-width: 0; border: 0; border-right: 1px solid var(--rule); color: var(--ink-soft); background: transparent; cursor: pointer; font-size: .68rem; }
+.canvas-text-card > footer button { min-width: 0; border: 0; border-right: 1px solid var(--rule); color: var(--ink-soft); background: transparent; cursor: pointer; font-size: .66rem; }
 .canvas-text-card > footer button:last-child { border-right: 0; }
 .canvas-text-card > footer button:hover { color: var(--ink); background: color-mix(in oklch, var(--paper) 86%, var(--accent-light)); }
 .canvas-text-card > footer .text-card-primary { color: var(--paper); background: var(--accent); }
 .canvas-text-card > footer .text-card-primary:hover { color: var(--paper); background: color-mix(in oklch, var(--accent) 82%, var(--ink)); }
+.canvas-text-card > .text-card-resize-handle {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  z-index: 2;
+  width: 1.25rem;
+  height: 1.25rem;
+  padding: 0;
+  border: 0;
+  border-radius: .25rem 0 .5rem 0;
+  color: color-mix(in oklch, var(--ink-soft) 72%, transparent);
+  background: transparent;
+  cursor: nwse-resize;
+  opacity: .42;
+}
+.canvas-text-card > .text-card-resize-handle::before,
+.canvas-text-card > .text-card-resize-handle::after {
+  content: "";
+  position: absolute;
+  right: .22rem;
+  bottom: .22rem;
+  height: 1px;
+  background: currentColor;
+  transform: rotate(-45deg);
+  transform-origin: right center;
+}
+.canvas-text-card > .text-card-resize-handle::before { width: .72rem; }
+.canvas-text-card > .text-card-resize-handle::after { width: .42rem; }
+.canvas-text-card:hover > .text-card-resize-handle,
+.canvas-text-card[data-selected="true"] > .text-card-resize-handle,
+.canvas-text-card > .text-card-resize-handle:focus-visible { color: var(--accent); opacity: 1; }
+.canvas-text-card > .text-card-resize-handle:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .ruler { position: absolute; z-index: 2; pointer-events: none; background-color: oklch(91% 0.019 72); opacity: .92; }
 .ruler-top { inset: 0 0 auto 0; height: 1.25rem; border-bottom: 1px solid var(--rule); background-image: repeating-linear-gradient(90deg, transparent 0 19px, var(--ink-soft) 19px 20px); }
 .ruler-left { inset: 0 auto 0 0; width: 1.25rem; border-right: 1px solid var(--rule); background-image: repeating-linear-gradient(0deg, transparent 0 19px, var(--ink-soft) 19px 20px); }

@@ -49,7 +49,7 @@ export function createCanvasBatchRun(
     workflowAction: options.workflowAction ?? "generate",
     rulesetVersion: options.rulesetVersion,
     styleReferenceVersionId,
-    targetChatUrl: options.targetChatUrl ?? null,
+    targetChatUrl: options.targetChatUrl?.trim() || null,
     items: sources.map((source): CanvasBatchItem => ({
       id: `batch_item_${crypto.randomUUID()}`,
       sourceVersionId: source.versionId,
@@ -138,7 +138,7 @@ export function createStageCanvasBatchRun(input: StageBatchInput, now = new Date
     workflowAction: input.action,
     rulesetVersion: "D5-RULESET-2.0",
     styleReferenceVersionId: input.styleReference?.versionId ?? null,
-    targetChatUrl: input.targetChatUrl,
+    targetChatUrl: input.targetChatUrl.trim() || null,
     items,
     createdAt: now,
     updatedAt: now

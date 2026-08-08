@@ -151,6 +151,10 @@ async function fillAndUpload(): Promise<void> {
     });
     setStatus(`正在等待 ${adapter.label} 输入区；如未登录请完成登录…`);
     const target = await adapter.waitForComposer();
+    if (adapter.provider === "chatgpt") {
+      if (!adapter.waitForAttachmentCount) throw new Error("当前 ChatGPT 适配器缺少附件数量校验");
+      await adapter.waitForAttachmentCount(0, 1_000);
+    }
     filledOnThisPage = true;
     setStatus("正在填入提示词并逐字校验…"); await setComposerText(target, bridge.task.prompt);
     if (bridge.task.attachments.length) {
@@ -171,16 +175,20 @@ async function fillAndUpload(): Promise<void> {
           }
         }
       } else {
-        const input = await adapter.waitForUploadInput();
-        const transfer = new DataTransfer();
-        for (const attachment of bridge.task.attachments) transfer.items.add(await fetchAttachment(attachment));
-        input.files = transfer.files;
-        input.dispatchEvent(new Event("input", { bubbles: true }));
-        input.dispatchEvent(new Event("change", { bubbles: true }));
+        if (!adapter.waitForAttachmentCount) throw new Error("当前 ChatGPT 适配器缺少附件数量校验");
+        for (const [index, attachment] of bridge.task.attachments.entries()) {
+          const input = await adapter.waitForUploadInput();
+          const transfer = new DataTransfer();
+          transfer.items.add(await fetchAttachment(attachment));
+          input.files = transfer.files;
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          input.dispatchEvent(new Event("change", { bubbles: true }));
+          await adapter.waitForAttachmentCount(index + 1);
+        }
       }
     }
     await adapter.waitUntilSendReady();
-    await send("ready-to-submit", { note: "提示词与附件已写入可见页面" });
+    await send("ready-to-submit", { note: `提示词与 ${bridge.task.attachments.length} 张附件已在可见页面确认` });
     if (adapter.provider === "google-flow") {
       await prepareManualFlowSubmit();
     } else {
@@ -189,6 +197,33 @@ async function fillAndUpload(): Promise<void> {
     }
   } catch (error) { filledOnThisPage = false; await handoff(errorMessage(error)); }
   finally { filling = false; }
+}
+
+function waitForResultSignal(timeoutMs = 2_000): Promise<void> {
+  const resultSelector = "img[src], button[data-testid='stop-button'], button[aria-label*='Stop'], button[aria-label*='停止']";
+  const containsResultSignal = (node: Node): boolean => node instanceof Element
+    && (node.matches(resultSelector) || Boolean(node.querySelector(resultSelector)));
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      observer.disconnect();
+      clearTimeout(timer);
+      resolve();
+    };
+    const observer = new MutationObserver((records) => {
+      if (records.some((record) => record.type === "attributes"
+        || [...record.addedNodes, ...record.removedNodes].some(containsResultSignal))) finish();
+    });
+    observer.observe(document.documentElement, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ["src"]
+    });
+    const timer = setTimeout(finish, timeoutMs);
+  });
 }
 
 async function prepareManualFlowSubmit(): Promise<void> {
@@ -251,9 +286,11 @@ async function submitOnce(): Promise<void> {
       }) as ExtensionResponse;
       if (!response.ok) throw new Error(response.error ?? "Google Flow 可信创建点击失败");
     } else {
+      const submissionMarker = adapter.submissionMarker?.();
       button.click();
+      if (!adapter.waitForSubmissionStart) throw new Error("当前 ChatGPT 适配器缺少发送结果校验");
+      await adapter.waitForSubmissionStart(submissionMarker);
     }
-    await new Promise((resolve) => setTimeout(resolve, 1_500));
     await send("generating", { note: "等待当前回复完成" });
     setStatus("已自动单次提交；生成完成后将自动收集并返回画布。");
     void observeAndCollect();
@@ -410,7 +447,7 @@ async function observeAndCollect(): Promise<void> {
           return;
         }
       }
-      await new Promise((resolve) => setTimeout(resolve, 2_000));
+      await waitForResultSignal();
     }
     if (bridge?.task.status !== "completed") await handoff("10 分钟内未能稳定识别本轮完成图片");
   } catch (error) { await handoff(`自动观察失败：${errorMessage(error)}`); }

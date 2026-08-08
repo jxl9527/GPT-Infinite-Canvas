@@ -4,7 +4,8 @@ import {
   alignedGlassFilename,
   aspectRatiosMatch,
   createCanvasTextCard,
-  extractFinalPrompt
+  extractFinalPrompt,
+  resizedTextCardSize
 } from "../src/text-card.js";
 
 test("文字结果在来源图片右侧形成可追溯提示词卡", () => {
@@ -32,6 +33,11 @@ test("提示词卡优先提取最终生成提示词段落", () => {
     "【必须保持与禁止改变】",
     "不得修改窗格。"
   ].join("\n")), "保持建筑结构不变，增加克制景观。");
+});
+
+test("文字卡按画布缩放比例自由调整宽高并保持最小可用尺寸", () => {
+  assert.deepEqual(resizedTextCardSize(460, 360, 120, 80, 0.5), { width: 700, height: 520 });
+  assert.deepEqual(resizedTextCardSize(460, 360, -1000, -1000), { width: 320, height: 240 });
 });
 
 test("玻璃整图只接受相同比例，并生成PS对齐文件名", () => {

@@ -21,6 +21,7 @@ import {
 
 interface ProjectWorkbenchProps {
   onOpen(project: WorkbenchProject): void;
+  requestedProjectId?: string | null;
 }
 
 function projectDate(value: string): string {
@@ -48,7 +49,7 @@ async function copyText(value: string): Promise<void> {
   if (!copied) throw new Error("浏览器未允许写入剪贴板");
 }
 
-export function ProjectWorkbench({ onOpen }: ProjectWorkbenchProps) {
+export function ProjectWorkbench({ onOpen, requestedProjectId = null }: ProjectWorkbenchProps) {
   const [projects, setProjects] = useState<WorkbenchProject[]>([]);
   const [name, setName] = useState("");
   const [loading, setLoading] = useState(true);
@@ -72,12 +73,20 @@ export function ProjectWorkbench({ onOpen }: ProjectWorkbenchProps) {
       await connectCanvasSession();
       const result = await listWorkbenchProjects();
       setProjects(result.projects);
+      const requestedProject = requestedProjectId
+        ? result.projects.find((project) => project.id === requestedProjectId) ?? null
+        : null;
+      if (requestedProject) {
+        onOpen(result.activeProjectId === requestedProject.id
+          ? requestedProject
+          : await activateWorkbenchProject(requestedProject.id));
+      }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "无法读取项目列表");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [onOpen, requestedProjectId]);
 
   useEffect(() => {
     void load();

@@ -51,6 +51,7 @@ import {
 } from "./bridge-client";
 import {
   isTerminalStatus,
+  MAX_VIEWPOINT_CONCLUSION_LENGTH,
   responseModeOf,
   type GenerationProvider,
   type GenerationStatus,
@@ -87,6 +88,8 @@ import {
   MINIMUM_AUTOMATION_EXTENSION_VERSION,
   automationExtensionReady,
   automationExtensionVersion,
+  generationPlaceholderBounds,
+  shouldShowImageGenerationPlaceholder,
   shouldAutoReturnResults
 } from "./canvas-automation";
 import {
@@ -117,6 +120,7 @@ import {
   type ViewpointStatus,
   type WorkflowStage
 } from "./project-state";
+import { workflowConclusionFromText } from "./workflow-text";
 import {
   createCanvasHistory,
   moveCanvasHistory,
@@ -158,6 +162,7 @@ import {
   aspectRatiosMatch,
   createCanvasTextCard,
   extractFinalPrompt,
+  resizedTextCardSize,
   type CanvasTextCard
 } from "./text-card";
 
@@ -669,11 +674,54 @@ function CanvasTextCardNode({
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", end);
       window.removeEventListener("pointercancel", end);
+      window.removeEventListener("blur", end);
       onCommit();
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", end);
     window.addEventListener("pointercancel", end);
+    window.addEventListener("blur", end);
+  };
+  const beginResize = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onSelect();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const originalWidth = card.width;
+    const originalHeight = card.height;
+    const move = (moveEvent: PointerEvent) => onChange(resizedTextCardSize(
+      originalWidth,
+      originalHeight,
+      moveEvent.clientX - startX,
+      moveEvent.clientY - startY,
+      viewport.scale
+    ));
+    const end = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+      window.removeEventListener("blur", end);
+      onCommit();
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", end);
+    window.addEventListener("pointercancel", end);
+    window.addEventListener("blur", end);
+  };
+  const resizeFromKeyboard = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    const step = event.shiftKey ? 4 : 16;
+    const delta = event.key === "ArrowRight" ? { x: step, y: 0 }
+      : event.key === "ArrowLeft" ? { x: -step, y: 0 }
+        : event.key === "ArrowDown" ? { x: 0, y: step }
+          : event.key === "ArrowUp" ? { x: 0, y: -step }
+            : null;
+    if (!delta) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onChange(resizedTextCardSize(card.width, card.height, delta.x, delta.y));
+    onCommit();
   };
   return (
     <article
@@ -694,13 +742,7 @@ function CanvasTextCardNode({
     >
       <header onPointerDown={beginDrag} title="拖动文字卡">
         <span>{card.kind === "prompt" ? "PROMPT" : "REVIEW"}</span>
-        <input
-          value={card.title}
-          maxLength={120}
-          aria-label="文字卡标题"
-          onChange={(event) => onChange({ title: event.target.value })}
-          onBlur={onCommit}
-        />
+        <strong title="标题由任务生成，已锁定">{card.title}</strong>
         <button type="button" title="从画布移除文字卡" onClick={onRemove}>×</button>
       </header>
       <textarea
@@ -717,6 +759,14 @@ function CanvasTextCardNode({
         <button type="button" onClick={() => onCopy(chosenText(false))}>复制</button>
         <button type="button" onClick={() => onSave(chosenText(false))}>存入库</button>
       </footer>
+      <button
+        type="button"
+        className="text-card-resize-handle"
+        aria-label="调整文字卡大小"
+        title="拖动调整大小；方向键微调，Shift + 方向键精调"
+        onPointerDown={beginResize}
+        onKeyDown={resizeFromKeyboard}
+      />
     </article>
   );
 }
@@ -875,7 +925,14 @@ function persistWorkbenchWidth(value: number): void {
   }
 }
 
-export function App({ projectName }: { projectId: string; projectName: string }) {
+export function App({
+  projectName,
+  onBackToProjects
+}: {
+  projectId: string;
+  projectName: string;
+  onBackToProjects(): void;
+}) {
   const { ref: canvasRef, size } = useElementSize<HTMLDivElement>();
   const [tool, setTool] = useState<Tool>("select");
   const [nodes, setNodes] = useState<ImageNodeState[]>([]);
@@ -947,6 +1004,7 @@ export function App({ projectName }: { projectId: string; projectName: string })
   const [returnedResultIds, setReturnedResultIds] = useState<string[]>([]);
   const [projectLoaded, setProjectLoaded] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>("loading");
+  const [returningToProjects, setReturningToProjects] = useState(false);
   const [historyVersion, setHistoryVersion] = useState(0);
   const [workbenchHeight, setWorkbenchHeight] = useState<number | null>(readSavedWorkbenchHeight);
   const [workbenchWidth, setWorkbenchWidth] = useState<number | null>(readSavedWorkbenchWidth);
@@ -968,8 +1026,9 @@ export function App({ projectName }: { projectId: string; projectName: string })
   const projectCreatedAtRef = useRef(new Date().toISOString());
   const lastSavedRevisionRef = useRef(-1);
   const snapshottedTaskRef = useRef<string | null>(null);
-  const saveInFlightRef = useRef<Promise<void> | null>(null);
+  const saveInFlightRef = useRef<Promise<boolean> | null>(null);
   const saveRequestedRef = useRef(false);
+  const saveReturnedTextCardImmediatelyRef = useRef(false);
   const latestSaveStateRef = useRef<LatestSaveState>({
     projectName,
     revision,
@@ -1273,6 +1332,22 @@ export function App({ projectName }: { projectId: string; projectName: string })
     return true;
   }, []);
 
+  useEffect(() => {
+    if (!middlePanning) return;
+    const releaseOutsideCanvas = (event: MouseEvent) => {
+      if (!isMiddleMouseButton(event.button)) return;
+      if (event.target instanceof Node && canvasRef.current?.contains(event.target)) return;
+      endMiddlePan();
+    };
+    const releaseWhenWindowLosesFocus = () => { endMiddlePan(); };
+    window.addEventListener("mouseup", releaseOutsideCanvas);
+    window.addEventListener("blur", releaseWhenWindowLosesFocus);
+    return () => {
+      window.removeEventListener("mouseup", releaseOutsideCanvas);
+      window.removeEventListener("blur", releaseWhenWindowLosesFocus);
+    };
+  }, [canvasRef, endMiddlePan, middlePanning]);
+
   const connectService = useCallback(async () => {
     setServiceState("connecting");
     try {
@@ -1405,7 +1480,7 @@ export function App({ projectName }: { projectId: string; projectName: string })
       saveRequestedRef.current = true;
       return saveInFlightRef.current;
     }
-    const run = async () => {
+    const run = async (): Promise<boolean> => {
       do {
         saveRequestedRef.current = false;
         const snapshot = latestSaveStateRef.current;
@@ -1440,10 +1515,11 @@ export function App({ projectName }: { projectId: string; projectName: string })
         } catch (error) {
           setSaveState("error");
           setNotice(error instanceof Error ? `自动保存失败：${error.message}` : "自动保存失败");
-          return;
+          return false;
         }
       } while (saveRequestedRef.current);
       setSaveState("saved");
+      return true;
     };
     const pending = run().finally(() => {
       saveInFlightRef.current = null;
@@ -1451,6 +1527,43 @@ export function App({ projectName }: { projectId: string; projectName: string })
     saveInFlightRef.current = pending;
     return pending;
   }, []);
+
+  const returnToProjects = useCallback(async () => {
+    if (returningToProjects) return;
+    if (!projectLoaded) {
+      setNotice("项目仍在恢复，请稍候再返回项目列表。");
+      return;
+    }
+    if (serviceState !== "connected") {
+      setNotice("本地服务尚未连接，无法确认当前画布已经保存；请先重新连接。");
+      return;
+    }
+    setReturningToProjects(true);
+    try {
+      saveRequestedRef.current = true;
+      const saved = await saveProjectNow();
+      if (saved) onBackToProjects();
+    } finally {
+      setReturningToProjects(false);
+    }
+  }, [onBackToProjects, projectLoaded, returningToProjects, saveProjectNow, serviceState]);
+
+  const retryProjectSave = useCallback(async () => {
+    if (serviceState !== "connected" || !projectLoaded) return;
+    saveRequestedRef.current = true;
+    if (await saveProjectNow()) setNotice("画布已重新保存。");
+  }, [projectLoaded, saveProjectNow, serviceState]);
+
+  useEffect(() => {
+    if (
+      !saveReturnedTextCardImmediatelyRef.current
+      || serviceState !== "connected"
+      || !projectLoaded
+    ) return;
+    saveReturnedTextCardImmediatelyRef.current = false;
+    saveRequestedRef.current = true;
+    void saveProjectNow();
+  }, [projectLoaded, revision, saveProjectNow, serviceState, textCards]);
 
   useEffect(() => {
     if (serviceState !== "connected" || !projectLoaded) return;
@@ -2956,6 +3069,7 @@ export function App({ projectName }: { projectId: string; projectName: string })
         sourceBounds: source,
         siblingCount
       });
+      saveReturnedTextCardImmediatelyRef.current = true;
       setTextCards((current) => [...current, card]);
       setSelectedTextCardId(card.id);
       setSelectedId(null);
@@ -2967,7 +3081,7 @@ export function App({ projectName }: { projectId: string; projectName: string })
         const node = nodes.find((candidate) => candidate.versionId === versionId);
         if (node?.parentVersionId) relatedVersionIds.add(node.parentVersionId);
       }
-      const conclusion = generationTask.textResult.text.slice(0, 6_000);
+      const conclusion = workflowConclusionFromText(generationTask.textResult.text);
       setViewpoints((current) => current.map((viewpoint) => relatedVersionIds.has(viewpoint.sourceVersionId ?? "version_missing")
         ? {
           ...viewpoint,
@@ -3186,6 +3300,31 @@ export function App({ projectName }: { projectId: string; projectName: string })
     }
   }, [generationTask, returnedResultIds, returningResults, returnResultsToCanvas]);
 
+  const generationPlaceholder = useMemo(() => {
+    if (!generationTask) return null;
+    const batchItem = batchRun?.items.find((item) => item.taskId === generationTask.id) ?? null;
+    const sourceVersionId = batchItem?.sourceVersionId ?? taskParentVersionId;
+    const source = sourceVersionId
+      ? nodes.find((node) => node.versionId === sourceVersionId) ?? null
+      : structureBase;
+    const hasReturnedNode = nodes.some((node) => node.taskId === generationTask.id);
+    if (
+      !source
+      || !shouldShowImageGenerationPlaceholder(
+        generationTask.status,
+        responseModeOf(generationTask),
+        generationTask.results.length,
+        hasReturnedNode
+      )
+    ) return null;
+    return {
+      taskId: generationTask.id,
+      source,
+      bounds: generationPlaceholderBounds(source),
+      canCancel: !isTerminalStatus(generationTask.status)
+    };
+  }, [batchRun, generationTask, nodes, structureBase, taskParentVersionId]);
+
   const generationRelations = useMemo(() => {
     const imageRelations = nodes.flatMap((child) => {
     if (!child.parentVersionId) return [];
@@ -3203,8 +3342,14 @@ export function App({ projectName }: { projectId: string; projectName: string })
       if (!parent) return [];
       return [{ id: `${parent.id}-${card.id}`, points: buildCanvasRelation(parent, card).points }];
     });
-    return [...imageRelations, ...cardRelations];
-  }, [nodes, textCards]);
+    const placeholderRelation = generationPlaceholder
+      ? [{
+        id: `${generationPlaceholder.source.id}-${generationPlaceholder.taskId}-placeholder`,
+        points: buildCanvasRelation(generationPlaceholder.source, generationPlaceholder.bounds).points
+      }]
+      : [];
+    return [...imageRelations, ...cardRelations, ...placeholderRelation];
+  }, [generationPlaceholder, nodes, textCards]);
 
   const imageWorkflowBadges = useMemo(() => {
     const badges = new Map<string, ImageWorkflowBadge>();
@@ -3284,7 +3429,12 @@ export function App({ projectName }: { projectId: string; projectName: string })
           }}
         />
         <div className="tool-button-grid tool-command-grid">
-          <RailCommandButton glyph="←" label="项目" onClick={() => window.location.reload()} />
+          <RailCommandButton
+            glyph="←"
+            label="项目"
+            disabled={!projectLoaded || returningToProjects}
+            onClick={() => { void returnToProjects(); }}
+          />
           <RailCommandButton
             glyph="+"
             label="导入"
@@ -3341,6 +3491,14 @@ export function App({ projectName }: { projectId: string; projectName: string })
           scaleX={viewport.scale}
           scaleY={viewport.scale}
           draggable={middlePanning}
+          onDragMove={(event) => {
+            if (!middlePanningRef.current) return;
+            const x = event.target.x();
+            const y = event.target.y();
+            setViewport((current) => current.x === x && current.y === y
+              ? current
+              : { ...current, x, y });
+          }}
           onDragEnd={(event) => {
             if (middlePanningRef.current) {
               setViewport((current) => ({ ...current, x: event.target.x(), y: event.target.y() }));
@@ -3482,6 +3640,43 @@ export function App({ projectName }: { projectId: string; projectName: string })
             />
           </Layer>
         </Stage>
+
+        <div className="canvas-generation-placeholder-layer" aria-live="polite">
+          {generationPlaceholder && (
+            <article
+              className="generation-placeholder"
+              aria-label="图片正在生成"
+              style={{
+                left: viewport.x + generationPlaceholder.bounds.x * viewport.scale,
+                top: viewport.y + generationPlaceholder.bounds.y * viewport.scale,
+                width: generationPlaceholder.bounds.width * viewport.scale,
+                height: generationPlaceholder.bounds.height * viewport.scale
+              }}
+            >
+              <div
+                className="generation-placeholder-backdrop"
+                style={{ backgroundImage: `url(${generationPlaceholder.source.src})` }}
+                aria-hidden="true"
+              />
+              <div className="generation-placeholder-scrim" aria-hidden="true" />
+              <div className="generation-placeholder-content" role="status">
+                <span className="generation-placeholder-spinner" aria-hidden="true" />
+                <strong>正在生成中</strong>
+              </div>
+              {generationPlaceholder.canCancel && (
+                <button
+                  type="button"
+                  className="generation-placeholder-cancel"
+                  disabled={cancellingTask}
+                  onClick={() => void cancelActiveTask()}
+                >
+                  <span aria-hidden="true">×</span>
+                  {cancellingTask ? "正在取消…" : "取消生成"}
+                </button>
+              )}
+            </article>
+          )}
+        </div>
 
         <div className="canvas-text-card-layer" aria-label="GPT文字结果">
           {textCards.map((card) => (
@@ -3652,10 +3847,13 @@ export function App({ projectName }: { projectId: string; projectName: string })
           className="canvas-notice"
           role="status"
           aria-live="polite"
-          data-tone={serviceState === "offline" ? "error" : "info"}
+          data-tone={serviceState === "offline" || saveState === "error" ? "error" : "info"}
         >
           <span>{notice}</span>
           {serviceState === "offline" && <button onClick={() => void connectService()}>重新连接</button>}
+          {serviceState === "connected" && saveState === "error" && (
+            <button onClick={() => void retryProjectSave()}>重试保存</button>
+          )}
         </div>
       </main>
 
@@ -3930,7 +4128,7 @@ export function App({ projectName }: { projectId: string; projectName: string })
                     <span>本轮结论</span>
                     <textarea
                       rows={3}
-                      maxLength={1000}
+                      maxLength={MAX_VIEWPOINT_CONCLUSION_LENGTH}
                       value={activeViewpoint.conclusion}
                       placeholder="只记录已经确认的判断和采用理由。"
                       onChange={(event) => updateActiveViewpoint({ conclusion: event.target.value })}

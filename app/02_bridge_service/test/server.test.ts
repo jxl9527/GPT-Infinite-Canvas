@@ -158,8 +158,37 @@ test("v1 HTTP 完成附件读取、结果落盘去重、完成校验和脱敏诊
     const restoredProject = await fetch(`${base}/api/v1/canvas/project`, { headers })
       .then((response) => response.json()) as { project: { revision: number } };
     assert.equal(restoredProject.project.revision, 20);
+    const ordinaryGptBatchProject = structuredClone(project);
+    ordinaryGptBatchProject.revision = 21;
+    (ordinaryGptBatchProject as typeof ordinaryGptBatchProject & { workflow: unknown }).workflow = {
+      activeViewpointId: null,
+      viewpoints: [],
+      handoffs: [],
+      customGptUrl: "",
+      customGptEnabled: false,
+      textCards: [],
+      batchRun: {
+        id: "batch_00000000-0000-0000-0000-000000000001",
+        status: "ready",
+        prompt: "普通 GPT 批量任务",
+        styleReferenceVersionId: null,
+        targetChatUrl: "",
+        items: [{
+          id: "batch_item_00000000-0000-0000-0000-000000000001",
+          sourceVersionId: versionId,
+          sourceName: "结构图.png",
+          status: "queued",
+          taskId: null,
+          resultVersionIds: [],
+          error: ""
+        }],
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      }
+    };
+    assert.equal((await post("/api/v1/canvas/project", { project: ordinaryGptBatchProject })).response.status, 200);
     const invalidProject = structuredClone(project);
-    invalidProject.revision = 21;
+    invalidProject.revision = 22;
     invalidProject.versions[0]!.assetId = "asset_missing";
     assert.equal((await post("/api/v1/canvas/project", { project: invalidProject })).response.status, 422);
 

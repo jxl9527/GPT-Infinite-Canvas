@@ -60,7 +60,7 @@ test("阶段批次冻结阶段动作并允许普通 GPT 新对话", () => {
   assert.equal(run.promptMode, "stage-only");
   assert.equal(run.workflowStage, "stage-3");
   assert.equal(run.workflowAction, "prompt");
-  assert.equal(run.targetChatUrl, "");
+  assert.equal(run.targetChatUrl, null);
 });
 
 test("阶段一把三个候选视角组成同一个文字审查任务", () => {
@@ -72,10 +72,11 @@ test("阶段一把三个候选视角组成同一个文字审查任务", () => {
     prompt: workflowStagePrompt("stage-1", "analyze"),
     structureBase: null,
     styleReference: null,
-    targetChatUrl: "https://chatgpt.com/g/g-architect-review"
+    targetChatUrl: ""
   });
   assert.equal(run.items.length, 1);
   assert.equal(run.responseMode, "text");
+  assert.equal(run.targetChatUrl, null);
   assert.deepEqual(run.items[0]?.attachmentVersionIds, sources.map((source) => source.versionId));
   assert.deepEqual(run.items[0]?.attachmentRoles, ["content-reference", "content-reference", "content-reference"]);
 });

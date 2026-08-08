@@ -1,4 +1,5 @@
 export const SCHEMA_VERSION = "1.0" as const;
+export const MAX_VIEWPOINT_CONCLUSION_LENGTH = 1_000;
 
 export const TASK_TYPES = ["new", "edit", "variation", "redraw"] as const;
 export type TaskType = (typeof TASK_TYPES)[number];

@@ -17,6 +17,9 @@ namespace GPTCanvasContent {
     composer(): HTMLElement | null;
     uploadInput(): HTMLInputElement | null;
     waitForUploadInput(timeoutMs?: number): Promise<HTMLInputElement>;
+    waitForAttachmentCount?(expectedCount: number, timeoutMs?: number): Promise<void>;
+    submissionMarker?(): string;
+    waitForSubmissionStart?(previousMarker?: string, timeoutMs?: number): Promise<void>;
     sendButton(): HTMLButtonElement | null;
     isSendReady(): boolean;
     isGenerating(): boolean;
@@ -38,8 +41,8 @@ namespace GPTCanvasContent {
   export type ActivationMode = "fill" | "observe" | "manual";
 
   export function activationMode(status: string, submittedAt?: string): ActivationMode {
-    if (status === "needs-user") return "manual";
     if (submittedAt || ["submitted", "generating", "collecting", "returning"].includes(status)) return "observe";
+    if (status === "needs-user") return "manual";
     if (shouldAutoFill(status)) return "fill";
     return "manual";
   }
@@ -82,11 +85,17 @@ namespace GPTCanvasContent {
     return /(?:^|[\s`'"(])\/mnt\/data\/[^\s`'"<>]+\.(?:png|jpe?g|webp)(?=$|[\s`'"),])/i.test(value);
   }
 
-  export function isCollectableGeneratedImage(source: string, width: number, height: number): boolean {
+  export function isCollectableGeneratedImage(
+    source: string,
+    width: number,
+    height: number,
+    explicitlyGenerated = false
+  ): boolean {
     let protocol = "";
     try { protocol = new URL(source, location.href).protocol; }
     catch { return false; }
     if (!new Set(["https:", "http:", "blob:"]).has(protocol)) return false;
+    if (explicitlyGenerated) return true;
     return Math.max(width, height) >= 256 && Math.min(width, height) >= 128;
   }
 

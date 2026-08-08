@@ -94,6 +94,16 @@ export interface CanvasWorkflowState {
   textCards: CanvasTextCard[];
 }
 
+function normalizedBatchRun(run: CanvasBatchRun | null): CanvasBatchRun | null {
+  if (!run) return null;
+  return {
+    ...structuredClone(run),
+    targetChatUrl: typeof run.targetChatUrl === "string" && run.targetChatUrl.trim()
+      ? run.targetChatUrl.trim()
+      : null
+  };
+}
+
 export const EMPTY_CANVAS_WORKFLOW: CanvasWorkflowState = {
   activeViewpointId: null,
   viewpoints: [],
@@ -265,7 +275,10 @@ export function buildCanvasProjectDocument(input: ProjectBuildInput): CanvasProj
     assets,
     versions,
     taskLinks: [...taskLinksById.values()],
-    workflow: structuredClone(input.workflow)
+    workflow: {
+      ...structuredClone(input.workflow),
+      batchRun: normalizedBatchRun(input.workflow.batchRun)
+    }
   };
 }
 
@@ -328,7 +341,7 @@ export function restoreCanvasProjectStructure(project: CanvasProjectDocument): R
         textCards: Array.isArray(project.workflow.textCards)
           ? structuredClone(project.workflow.textCards)
           : [],
-        batchRun: project.workflow.batchRun ? structuredClone(project.workflow.batchRun) : null
+        batchRun: normalizedBatchRun(project.workflow.batchRun ?? null)
       }
       : structuredClone(EMPTY_CANVAS_WORKFLOW)
   };
