@@ -5,8 +5,10 @@ import {
   batchProgress,
   createCanvasBatchRun,
   createStageCanvasBatchRun,
+  defaultWorkflowAction,
   nextQueuedBatchItem,
-  updateBatchItem
+  updateBatchItem,
+  workflowActionAllowed
 } from "../src/batch-queue.js";
 import { workflowStagePrompt } from "../src/fixed-workflow-prompts.js";
 
@@ -46,73 +48,85 @@ test("batch queue keeps source order and reports progress", () => {
   assert.equal(nextQueuedBatchItem(next)?.sourceName, "D5_10.png");
 });
 
-test("阶段批次冻结阶段动作并允许普通 GPT 新对话", () => {
-  const prompt = workflowStagePrompt("stage-3", "prompt");
-  const run = createCanvasBatchRun([node("D5_1")], prompt, null, {
-    promptMode: "stage-only",
-    workflowStage: "stage-3",
-    workflowAction: "prompt",
-    responseMode: "text",
-    targetChatUrl: ""
-  });
-  assert.equal(run.prompt, prompt);
-  assert.match(run.prompt, /只返回文字/);
-  assert.equal(run.promptMode, "stage-only");
-  assert.equal(run.workflowStage, "stage-3");
-  assert.equal(run.workflowAction, "prompt");
-  assert.equal(run.targetChatUrl, null);
-});
-
-test("阶段一把三个候选视角组成同一个文字审查任务", () => {
-  const sources = [node("A"), node("B"), node("C")];
+test("前置阶段把多个不同D5视角拆成独立文字任务", () => {
+  const d5A = node("1人视");
+  const d5B = node("2鸟瞰");
   const run = createStageCanvasBatchRun({
-    sources,
-    stage: "stage-1",
+    sources: [d5A, d5B],
+    stage: "preflight",
     action: "analyze",
-    prompt: workflowStagePrompt("stage-1", "analyze"),
+    prompt: workflowStagePrompt("preflight", "analyze"),
     structureBase: null,
     styleReference: null,
     targetChatUrl: ""
   });
-  assert.equal(run.items.length, 1);
-  assert.equal(run.responseMode, "text");
-  assert.equal(run.targetChatUrl, null);
-  assert.deepEqual(run.items[0]?.attachmentVersionIds, sources.map((source) => source.versionId));
-  assert.deepEqual(run.items[0]?.attachmentRoles, ["content-reference", "content-reference", "content-reference"]);
-});
-
-test("阶段二固定D5与SU角色，阶段四每张最终D5整图单独生成", () => {
-  const d5 = node("D5"); const su = node("SU"); const maskA = node("mask_A"); const maskB = node("mask_B");
-  const stageTwo = createStageCanvasBatchRun({
-    sources: [su, d5], stage: "stage-2", action: "analyze", prompt: "阶段二审查", structureBase: d5,
-    styleReference: null, targetChatUrl: "https://chatgpt.com/g/g-architect-review"
-  });
-  assert.deepEqual(stageTwo.items[0]?.attachmentRoles, ["d5-locked-view", "su-reference"]);
-  assert.equal(stageTwo.responseMode, "text");
-
-  const stageFour = createStageCanvasBatchRun({
-    sources: [d5, maskA, maskB], stage: "stage-4", action: "generate", prompt: "阶段四玻璃", structureBase: d5,
-    styleReference: null, targetChatUrl: "https://chatgpt.com/g/g-architect-review"
-  });
-  assert.equal(stageFour.items.length, 3);
-  assert.equal(stageFour.responseMode, "image");
-  assert.deepEqual(stageFour.items.map((item) => item.attachmentRoles), [
-    ["structure-base"],
-    ["structure-base"],
-    ["structure-base"]
-  ]);
-});
-
-test("阶段三为每张底图附带同一风格参考", () => {
-  const baseA = node("base_A"); const baseB = node("base_B"); const style = node("style");
-  const run = createStageCanvasBatchRun({
-    sources: [baseA, baseB, style], stage: "stage-3", action: "prompt", prompt: "阶段三提示词", structureBase: baseA,
-    styleReference: style, targetChatUrl: "https://chatgpt.com/g/g-architect-review"
-  });
   assert.equal(run.items.length, 2);
   assert.equal(run.responseMode, "text");
-  assert.deepEqual(run.items.map((item) => item.attachmentRoles), [
+  assert.deepEqual(run.items.map((item) => item.sourceVersionId), [d5A.versionId, d5B.versionId]);
+  assert.deepEqual(run.items.map((item) => item.attachmentVersionIds), [[d5A.versionId], [d5B.versionId]]);
+  assert.deepEqual(run.items.map((item) => item.attachmentRoles), [["d5-locked-view"], ["d5-locked-view"]]);
+  assert.ok(run.items.every((item) => item.outputKind === "preflight-review"));
+});
+
+test("前置阶段为每个D5视角明确配对可选SU截图", () => {
+  const d5A = node("1人视"); const d5B = node("2鸟瞰"); const suA = node("1人视_SU");
+  const pairs = new Map<`version_${string}`, ImageNodeState>([[d5A.versionId, suA]]);
+  const run = createStageCanvasBatchRun({
+    sources: [d5A, d5B], stage: "preflight", action: "analyze", prompt: "前置审查",
+    structureBase: null, styleReference: null, targetChatUrl: "", suReferenceBySourceVersionId: pairs
+  });
+  assert.deepEqual(run.items[0]?.attachmentVersionIds, [d5A.versionId, suA.versionId]);
+  assert.deepEqual(run.items[0]?.attachmentRoles, ["d5-locked-view", "su-reference"]);
+  assert.deepEqual(run.items[1]?.attachmentVersionIds, [d5B.versionId]);
+  assert.throws(() => createStageCanvasBatchRun({
+    sources: [d5A], stage: "preflight", action: "analyze", prompt: "前置审查",
+    structureBase: null, styleReference: null, targetChatUrl: "",
+    suReferenceBySourceVersionId: new Map([[d5A.versionId, d5A]])
+  }), /不能是同一张/);
+});
+
+test("优化阶段可直接进入且提示词与生图保持两个独立动作", () => {
+  const baseA = node("base_A"); const baseB = node("base_B"); const style = node("style");
+  const promptRun = createStageCanvasBatchRun({
+    sources: [baseA, baseB, style], stage: "scene-optimization", action: "prompt", prompt: "场景提示词",
+    structureBase: baseA, styleReference: style, targetChatUrl: ""
+  });
+  assert.equal(promptRun.responseMode, "text");
+  assert.equal(promptRun.items.length, 2);
+  assert.deepEqual(promptRun.items.map((item) => item.attachmentRoles), [
     ["structure-base", "style-reference"],
     ["structure-base", "style-reference"]
   ]);
+  const imageRun = createStageCanvasBatchRun({
+    sources: [baseA], stage: "scene-optimization", action: "generate", prompt: "已确认提示词",
+    structureBase: baseA, styleReference: null, targetChatUrl: ""
+  });
+  assert.equal(imageRun.responseMode, "image");
+  assert.equal(imageRun.items[0]?.outputKind, "d5-scene-target");
+});
+
+test("最终阶段可直接进入且每张最终D5只形成一个整图玻璃任务", () => {
+  const d5A = node("D5_final_A"); const d5B = node("D5_final_B");
+  const run = createStageCanvasBatchRun({
+    sources: [d5A, d5B], stage: "final-glass", action: "generate", prompt: "玻璃深化",
+    structureBase: null, styleReference: null, targetChatUrl: ""
+  });
+  assert.equal(run.items.length, 2);
+  assert.equal(run.responseMode, "image");
+  assert.deepEqual(run.items.map((item) => item.attachmentVersionIds), [[d5A.versionId], [d5B.versionId]]);
+  assert.ok(run.items.every((item) => item.outputKind === "glass-deepened-full-frame"));
+});
+
+test("三阶段只开放当前阶段的有效动作且不存在前序完成门槛", () => {
+  assert.equal(defaultWorkflowAction("preflight"), "analyze");
+  assert.equal(defaultWorkflowAction("scene-optimization"), "prompt");
+  assert.equal(defaultWorkflowAction("final-glass"), "generate");
+  assert.equal(workflowActionAllowed("preflight", "generate"), false);
+  assert.equal(workflowActionAllowed("scene-optimization", "prompt"), true);
+  assert.equal(workflowActionAllowed("scene-optimization", "generate"), true);
+  assert.equal(workflowActionAllowed("final-glass", "prompt"), false);
+  assert.throws(() => createStageCanvasBatchRun({
+    sources: [node("D5")], stage: "preflight", action: "generate", prompt: "错误动作",
+    structureBase: null, styleReference: null, targetChatUrl: ""
+  }), /不支持/);
 });

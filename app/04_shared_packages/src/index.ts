@@ -1,6 +1,46 @@
 export const SCHEMA_VERSION = "1.0" as const;
 export const MAX_VIEWPOINT_CONCLUSION_LENGTH = 1_000;
 
+export const WORKFLOW_STAGES_V3 = ["preflight", "scene-optimization", "final-glass", "completed"] as const;
+export type WorkflowStageV3 = (typeof WORKFLOW_STAGES_V3)[number];
+
+export const CANVAS_OUTPUT_KINDS = [
+  "preflight-review",
+  "d5-scene-target",
+  "glass-deepened-full-frame"
+] as const;
+export type CanvasOutputKind = (typeof CANVAS_OUTPUT_KINDS)[number];
+
+export interface PreflightBatchItem {
+  d5ViewVersionId: `version_${string}`;
+  suReferenceVersionId?: `version_${string}`;
+  resultTextCardId?: `text_card_${string}`;
+}
+
+export interface ExportRecord {
+  versionId: `version_${string}`;
+  assetId: `asset_${string}`;
+  viewpointName: string;
+  destinationPath: string;
+  filename: string;
+  sha256: string;
+  status: "exported" | "deduplicated" | "failed";
+  exportedAt: string;
+  error?: string;
+}
+
+export function validatePreflightPairing(item: PreflightBatchItem): void {
+  if (!item.d5ViewVersionId.startsWith("version_")) {
+    throw new ProtocolError("INVALID_INPUT", "前置阶段 D5 视角版本无效");
+  }
+  if (item.suReferenceVersionId === item.d5ViewVersionId) {
+    throw new ProtocolError("INVALID_INPUT", "D5 视角与 SU 参考不能使用同一图片版本");
+  }
+  if (item.suReferenceVersionId && !item.suReferenceVersionId.startsWith("version_")) {
+    throw new ProtocolError("INVALID_INPUT", "前置阶段 SU 参考版本无效");
+  }
+}
+
 export const TASK_TYPES = ["new", "edit", "variation", "redraw"] as const;
 export type TaskType = (typeof TASK_TYPES)[number];
 

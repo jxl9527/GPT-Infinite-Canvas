@@ -1,6 +1,7 @@
 import type {
   CanvasImageAsset,
   CreateTaskInput,
+  ExportRecord,
   GenerationTask
 } from "@gpt-canvas/shared";
 import type { CanvasProjectDocument } from "./project-state";
@@ -71,27 +72,20 @@ export interface PromptLibraryItem {
 }
 
 export interface DeliveryTarget {
-  schemaVersion: "1.0";
-  aiDirectory: string;
-  finalDirectory: string;
+  schemaVersion: "2.0";
+  targetDirectory: string;
   configuredAt: string;
   updatedAt: string;
 }
 
-export interface AdoptionRecord {
-  at: string;
-  assetId: string;
-  versionId: string | null;
-  taskId: string | null;
-  viewpointName: string;
-  stage: "stage-3" | "stage-4" | "final";
-  usage: "ai-version" | "ps-local-material";
-  destinationPath: string;
-  filename: string;
-  promptDestinationPath: string | null;
-  targetAiDirectory: string;
+export interface FinalGlassBatchExport {
+  targetDirectory: string;
+  records: ExportRecord[];
+  exported: number;
+  deduplicated: number;
+  failed: number;
+  completed: boolean;
   logRelativePath: string;
-  deduplicated: boolean;
 }
 
 let sessionToken: string | null = null;
@@ -205,42 +199,32 @@ export async function readDeliveryTarget(): Promise<DeliveryTarget | null> {
   return body.target ?? null;
 }
 
-export async function saveDeliveryTarget(aiDirectory: string): Promise<DeliveryTarget> {
+export async function saveDeliveryTarget(targetDirectory: string): Promise<DeliveryTarget> {
   const response = await authenticatedFetch("/api/v1/canvas/delivery-target", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ aiDirectory })
+    body: JSON.stringify({ targetDirectory })
   });
   if (!response.ok) throw await apiError(response);
   const body = await response.json() as { target?: DeliveryTarget };
-  if (!body.target) throw new Error("本地服务未返回正式交接目录");
+  if (!body.target) throw new Error("本地服务未返回批量导出目录");
   return body.target;
 }
 
-export async function adoptCanvasAsset(input: {
+export async function exportFinalGlassSelections(selections: readonly {
   assetId: string;
+  versionId: string;
   viewpointName: string;
-  stage: "stage-3" | "stage-4" | "final";
-  taskId?: string | null;
-  versionId?: string | null;
-}): Promise<AdoptionRecord> {
-  const response = await authenticatedFetch(
-    `/api/v1/canvas/assets/${encodeURIComponent(input.assetId)}/adopt`,
-    {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        viewpointName: input.viewpointName,
-        stage: input.stage,
-        taskId: input.taskId,
-        versionId: input.versionId
-      })
-    }
-  );
-  if (!response.ok) throw await apiError(response);
-  const body = await response.json() as { adoption?: AdoptionRecord };
-  if (!body.adoption) throw new Error("本地服务未返回正式归档结果");
-  return body.adoption;
+}[]): Promise<FinalGlassBatchExport> {
+  const response = await authenticatedFetch("/api/v1/canvas/final-glass/batch-export", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ selections })
+  });
+  if (!response.ok && response.status !== 207) throw await apiError(response);
+  const body = await response.json() as { export?: FinalGlassBatchExport };
+  if (!body.export) throw new Error("本地服务未返回最终玻璃批量导出结果");
+  return body.export;
 }
 
 export async function activateWorkbenchProject(projectId: string): Promise<WorkbenchProject> {

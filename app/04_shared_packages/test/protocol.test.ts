@@ -3,9 +3,12 @@ import assert from "node:assert/strict";
 import {
   ProtocolError,
   STATUS_TRANSITIONS,
+  WORKFLOW_STAGES_V3,
+  CANVAS_OUTPUT_KINDS,
   canTransition,
   isTerminalStatus,
-  parseCreateTaskInput
+  parseCreateTaskInput,
+  validatePreflightPairing
 } from "../src/index.js";
 
 test("状态机禁止已提交任务回退和终态变化", () => {
@@ -78,7 +81,7 @@ test("已有会话必须使用与生成来源匹配的地址", () => {
   );
 });
 
-test("阶段任务最多接受三个已声明角色的附件", () => {
+test("任务最多接受三个已声明角色的附件", () => {
   const parsed = parseCreateTaskInput({
     taskType: "edit", responseMode: "text", target: { chatMode: "new" }, prompt: "对比三个候选视角",
     attachments: Array.from({ length: 3 }, (_, index) => ({ role: "content-reference", name: `${index}.png`, relativePath: `assets/${index}.png` }))
@@ -96,6 +99,23 @@ test("阶段任务最多接受三个已声明角色的附件", () => {
     () => parseCreateTaskInput({
       taskType: "edit", responseMode: "video", target: { chatMode: "new" }, prompt: "无效结果类型", attachments: []
     }),
+    (error) => error instanceof ProtocolError && error.code === "INVALID_INPUT"
+  );
+});
+
+test("V3共享协议固定三阶段、输出类型和D5／SU配对边界", () => {
+  assert.deepEqual(WORKFLOW_STAGES_V3, ["preflight", "scene-optimization", "final-glass", "completed"]);
+  assert.deepEqual(CANVAS_OUTPUT_KINDS, [
+    "preflight-review",
+    "d5-scene-target",
+    "glass-deepened-full-frame"
+  ]);
+  assert.doesNotThrow(() => validatePreflightPairing({
+    d5ViewVersionId: "version_d5",
+    suReferenceVersionId: "version_su"
+  }));
+  assert.throws(
+    () => validatePreflightPairing({ d5ViewVersionId: "version_same", suReferenceVersionId: "version_same" }),
     (error) => error instanceof ProtocolError && error.code === "INVALID_INPUT"
   );
 });

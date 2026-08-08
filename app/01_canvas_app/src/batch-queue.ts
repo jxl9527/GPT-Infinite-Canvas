@@ -19,10 +19,22 @@ export const WORKFLOW_ACTION_LABELS: Readonly<Record<WorkflowAction, string>> = 
   generate: "按提示词生成图片"
 };
 
+export const WORKFLOW_STAGE_ACTIONS: Readonly<Record<NonNullable<CanvasBatchRun["workflowStage"]>, readonly WorkflowAction[]>> = {
+  preflight: ["analyze"],
+  "scene-optimization": ["prompt", "generate"],
+  "final-glass": ["generate"],
+  completed: []
+};
+
+export function workflowActionAllowed(
+  stage: NonNullable<CanvasBatchRun["workflowStage"]>,
+  action: WorkflowAction
+): boolean {
+  return WORKFLOW_STAGE_ACTIONS[stage].includes(action);
+}
+
 export function defaultWorkflowAction(stage: NonNullable<CanvasBatchRun["workflowStage"]>): WorkflowAction {
-  if (stage === "stage-3") return "prompt";
-  if (stage === "stage-4") return "generate";
-  return "analyze";
+  return WORKFLOW_STAGE_ACTIONS[stage][0] ?? "analyze";
 }
 
 export function createCanvasBatchRun(
@@ -74,6 +86,7 @@ interface StageBatchInput {
   styleReference: ImageNodeState | null;
   targetChatUrl: string;
   action: WorkflowAction;
+  suReferenceBySourceVersionId?: ReadonlyMap<`version_${string}`, ImageNodeState>;
 }
 
 function item(
@@ -97,36 +110,41 @@ function item(
 export function createStageCanvasBatchRun(input: StageBatchInput, now = new Date().toISOString()): CanvasBatchRun {
   const sources = [...new Map(input.sources.map((source) => [source.versionId, source])).values()];
   if (!sources.length) throw new Error("请至少选择一张阶段输入图片");
+  if (!workflowActionAllowed(input.stage, input.action)) {
+    throw new Error(`${input.stage === "preflight" ? "前置阶段" : input.stage === "scene-optimization" ? "优化阶段" : input.stage === "final-glass" ? "最终阶段" : "已完成阶段"}不支持“${WORKFLOW_ACTION_LABELS[input.action]}”`);
+  }
   let items: CanvasBatchItem[];
-  if (input.stage === "stage-1") {
-    if (sources.length > 3) throw new Error("阶段一一次最多比较三张候选视角");
-    items = [item(sources[0]!, sources, sources.map(() => "content-reference"))];
-  } else if (input.stage === "stage-2") {
-    const d5 = input.structureBase && sources.some((source) => source.versionId === input.structureBase!.versionId)
-      ? input.structureBase
-      : null;
-    const su = sources.find((source) => source.versionId !== d5?.versionId) ?? null;
-    if (!d5 || !su || sources.length !== 2) {
-      throw new Error("阶段二需选择两张图，并把锁定的D5正式视角设为“结构基准”；另一张作为对应SU截图");
-    }
-    items = [item(d5, [d5, su], ["d5-locked-view", "su-reference"])];
-  } else if (input.stage === "stage-3") {
+  if (input.stage === "preflight") {
+    items = sources.map((source) => {
+      const su = input.suReferenceBySourceVersionId?.get(source.versionId) ?? null;
+      if (su?.versionId === source.versionId) throw new Error(`${source.name} 的 D5 图与 SU 参考不能是同一张图片`);
+      return {
+        ...item(source, su ? [source, su] : [source], su ? ["d5-locked-view", "su-reference"] : ["d5-locked-view"]),
+        outputKind: "preflight-review" as const,
+        resultTextCardId: null
+      };
+    });
+  } else if (input.stage === "scene-optimization") {
     const candidates = sources.filter((source) => source.versionId !== input.styleReference?.versionId);
-    if (!candidates.length) throw new Error("阶段三缺少结构底图");
+    if (!candidates.length) throw new Error("优化阶段缺少结构与构图依据图");
     items = candidates.map((source) => {
       const style = input.styleReference && input.styleReference.versionId !== source.versionId
         ? input.styleReference
         : null;
-      return item(source, style ? [source, style] : [source], style
-        ? ["structure-base", "style-reference"]
-        : ["structure-base"]);
+      return {
+        ...item(source, style ? [source, style] : [source], style
+          ? ["structure-base", "style-reference"]
+          : ["structure-base"]),
+        outputKind: "d5-scene-target" as const
+      };
     });
-  } else if (input.stage === "stage-4") {
-    items = sources.map((source) => item(source, [source], ["structure-base"]));
+  } else if (input.stage === "final-glass") {
+    items = sources.map((source) => ({
+      ...item(source, [source], ["structure-base"]),
+      outputKind: "glass-deepened-full-frame" as const
+    }));
   } else {
-    items = sources.map((source) => input.structureBase && input.structureBase.versionId !== source.versionId
-      ? item(source, [input.structureBase!, source], ["structure-base", "delivery-candidate"])
-      : item(source, [source], ["delivery-candidate"]));
+    throw new Error("已完成阶段不能再建立生成任务");
   }
   return {
     id: `batch_${crypto.randomUUID()}`,
@@ -136,7 +154,7 @@ export function createStageCanvasBatchRun(input: StageBatchInput, now = new Date
     workflowStage: input.stage,
     responseMode: input.action === "generate" ? "image" : "text",
     workflowAction: input.action,
-    rulesetVersion: "D5-RULESET-2.0",
+    rulesetVersion: "D5-RULESET-3.0",
     styleReferenceVersionId: input.styleReference?.versionId ?? null,
     targetChatUrl: input.targetChatUrl.trim() || null,
     items,

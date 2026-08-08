@@ -187,8 +187,38 @@ test("v1 HTTP 完成附件读取、结果落盘去重、完成校验和脱敏诊
       }
     };
     assert.equal((await post("/api/v1/canvas/project", { project: ordinaryGptBatchProject })).response.status, 200);
+    const v3Project = structuredClone(project) as typeof project & { workflow?: unknown };
+    (v3Project as { schemaVersion: string }).schemaVersion = "2.0";
+    v3Project.revision = 22;
+    v3Project.workflow = {
+      activeViewpointId: "viewpoint_v3",
+      viewpoints: [{
+        id: "viewpoint_v3",
+        name: "1人视",
+        purpose: "主入口",
+        stage: "preflight",
+        status: "in-progress",
+        statusMode: "auto",
+        d5Batch: "D5_01",
+        sourceVersionId: versionId,
+        selectedVersionId: null,
+        conclusion: "",
+        nextAction: "",
+        preflight: { d5ViewVersionId: versionId, suReferenceVersionId: null, conclusionCardId: null, status: "pending" },
+        sceneOptimization: { structureBaseVersionId: null, styleReferenceVersionId: null, promptCardId: null, candidateVersionIds: [], selectedVersionId: null, status: "not-run" },
+        finalGlass: { finalD5VersionId: null, candidateVersionIds: [], selectedVersionIds: [], validation: "pending", status: "not-run" },
+        export: { targetDirectory: null, exportedVersionIds: [], exportedFiles: [], exportedAt: null, status: "pending" },
+        updatedAt: new Date().toISOString()
+      }],
+      handoffs: [],
+      customGptUrl: "",
+      customGptEnabled: false,
+      textCards: [],
+      batchRun: null
+    };
+    assert.equal((await post("/api/v1/canvas/project", { project: v3Project })).response.status, 200);
     const invalidProject = structuredClone(project);
-    invalidProject.revision = 22;
+    invalidProject.revision = 23;
     invalidProject.versions[0]!.assetId = "asset_missing";
     assert.equal((await post("/api/v1/canvas/project", { project: invalidProject })).response.status, 422);
 
@@ -257,6 +287,26 @@ test("v1 HTTP 完成附件读取、结果落盘去重、完成校验和脱敏诊
     });
     assert.equal(generatedAsset.response.status, 201);
     assert.equal((generatedAsset.json.asset as { kind: string }).kind, "generated");
+    const finalExportDirectory = join(root, "exports", "玻璃深化");
+    await mkdir(join(root, "exports"), { recursive: true });
+    const savedExportTarget = await post("/api/v1/canvas/delivery-target", {
+      targetDirectory: finalExportDirectory
+    });
+    assert.equal(savedExportTarget.response.status, 200);
+    assert.equal(
+      ((savedExportTarget.json.target ?? {}) as { targetDirectory?: string }).targetDirectory,
+      finalExportDirectory
+    );
+    const batchExport = await post("/api/v1/canvas/final-glass/batch-export", {
+      selections: [{
+        assetId: (generatedAsset.json.asset as { id: string }).id,
+        versionId: "version_final_glass_01",
+        viewpointName: "1人视"
+      }]
+    });
+    assert.equal(batchExport.response.status, 201);
+    assert.equal(((batchExport.json.export ?? {}) as { exported?: number }).exported, 1);
+    assert.deepEqual(await readFile(join(finalExportDirectory, "1人视_玻璃整图_01.png")), generatedPixel);
 
     const completed = await post(`/api/v1/tasks/${created.id}/complete`, { by: "test" });
     assert.equal(completed.response.status, 200);

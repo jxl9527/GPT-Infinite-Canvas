@@ -4,8 +4,10 @@ import type { CanvasImageAsset } from "@gpt-canvas/shared";
 import type { ImageNodeState } from "../src/canvas-layout.js";
 import {
   buildCanvasProjectDocument,
+  createViewpointStatusCard,
   restoreCanvasProjectStructure
 } from "../src/project-state.js";
+import type { CanvasProjectDocument } from "../src/project-state.js";
 
 const asset: CanvasImageAsset = {
   id: "asset_00000000-0000-0000-0000-000000000001",
@@ -101,15 +103,16 @@ test("项目保存与恢复保持节点、批注和版本引用", () => {
         updatedAt: "2026-07-23T01:00:00.000Z"
       }],
       viewpoints: [{
+        ...createViewpointStatusCard({
         id: "viewpoint_00000000-0000-0000-0000-000000000001",
         name: "1人视",
         purpose: "主入口投标主图",
-        stage: "stage-3",
-        status: "in-progress",
-        statusMode: "auto",
+        stage: "scene-optimization",
         d5Batch: "D5_01",
         sourceVersionId: node.versionId,
-        selectedVersionId: null,
+        updatedAt: "2026-07-23T01:00:00.000Z"
+        }),
+        status: "in-progress",
         conclusion: "构图已锁定",
         nextAction: "继续D5材质深化",
         updatedAt: "2026-07-23T01:00:00.000Z"
@@ -131,6 +134,8 @@ test("项目保存与恢复保持节点、批注和版本引用", () => {
   assert.equal(restored.workflow.batchRun?.targetChatUrl, null);
   assert.equal(restored.workflow.textCards[0]?.kind, "prompt");
   assert.equal(restored.workflow.textCards[0]?.text, longPromptText);
+  assert.equal(project.schemaVersion, "2.0");
+  assert.equal(restored.workflow.viewpoints[0]?.sceneOptimization.structureBaseVersionId, node.versionId);
   assert.equal(new Set(project.canvas.nodes.map((entry) => entry.id)).size, project.canvas.nodes.length);
   assert.match(project.canvas.nodes[1]?.id ?? "", /^node_annotation_/);
 });
@@ -149,4 +154,63 @@ test("未登记资产不得保存到项目", () => {
     taskParentVersionId: null,
     workflow: { activeViewpointId: null, viewpoints: [], handoffs: [], batchRun: null, customGptUrl: "", customGptEnabled: false, textCards: [] }
   }), /节点资产未登记/);
+});
+
+test("旧四阶段项目迁移为V3三阶段且保留项目数据", () => {
+  const legacy = buildCanvasProjectDocument({
+    projectId: "project_00000000-0000-0000-0000-000000000001",
+    title: "旧项目迁移",
+    createdAt: "2026-07-23T00:00:00.000Z",
+    revision: 3,
+    viewport: { x: 0, y: 0, scale: 1 },
+    nodes: [node],
+    annotations: [],
+    assets: [asset],
+    generationTask: null,
+    taskParentVersionId: null,
+    workflow: { activeViewpointId: null, viewpoints: [], handoffs: [], batchRun: null, customGptUrl: "", customGptEnabled: false, textCards: [] }
+  });
+  legacy.schemaVersion = "1.0";
+  legacy.workflow = {
+    activeViewpointId: "viewpoint_legacy",
+    viewpoints: [{
+      id: "viewpoint_legacy",
+      name: "1人视",
+      purpose: "主入口",
+      stage: "stage-2",
+      status: "in-progress",
+      d5Batch: "D5_01",
+      sourceVersionId: node.versionId,
+      selectedVersionId: null,
+      conclusion: "补充入口窗框",
+      nextAction: "返回SU",
+      updatedAt: "2026-07-23T01:00:00.000Z"
+    }],
+    handoffs: [{
+      id: "handoff_legacy",
+      viewpointId: "viewpoint_legacy",
+      viewpointName: "1人视",
+      stage: "stage-4",
+      status: "in-progress",
+      target: "photoshop",
+      d5Batch: "D5_01",
+      sourceVersionId: node.versionId,
+      selectedVersionId: null,
+      taskId: null,
+      conclusion: "玻璃待处理",
+      nextAction: "旧流程",
+      createdAt: "2026-07-23T01:00:00.000Z"
+    }],
+    batchRun: null,
+    customGptUrl: "",
+    customGptEnabled: false,
+    textCards: []
+  } as unknown as CanvasProjectDocument["workflow"];
+  const restored = restoreCanvasProjectStructure(legacy);
+  assert.equal(restored.imageNodes.length, 1);
+  assert.equal(restored.workflow.viewpoints[0]?.stage, "preflight");
+  assert.equal(restored.workflow.viewpoints[0]?.preflight.d5ViewVersionId, node.versionId);
+  assert.equal(restored.workflow.viewpoints[0]?.conclusion, "补充入口窗框");
+  assert.equal(restored.workflow.handoffs[0]?.stage, "final-glass");
+  assert.equal(restored.workflow.handoffs[0]?.target, "review");
 });

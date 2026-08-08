@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const workspaceRoot = resolve(appRoot, "..");
-const version = process.argv[2] ?? "0.3.0";
+const version = process.argv[2] ?? "0.4.0";
 if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error(`版本号无效：${version}`);
 const bundleName = `GPT_Infinite_Canvas_${version}`;
 const releaseRoot = join(workspaceRoot, "releases");

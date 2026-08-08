@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ImageNodeState } from "../src/canvas-layout.js";
 import type { ViewpointStatusCard } from "../src/project-state.js";
+import { createViewpointStatusCard } from "../src/project-state.js";
 import { inferViewpointStatus } from "../src/workflow-status.js";
 
 const source: ImageNodeState = {
@@ -24,18 +25,15 @@ const source: ImageNodeState = {
 };
 
 const viewpoint: ViewpointStatusCard = {
+  ...createViewpointStatusCard({
   id: "viewpoint_test",
   name: "1人视",
   purpose: "主入口投标主图",
-  stage: "stage-1",
-  status: "not-started",
-  statusMode: "auto",
+  stage: "preflight",
   d5Batch: "D5_01",
   sourceVersionId: source.versionId,
-  selectedVersionId: null,
-  conclusion: "",
-  nextAction: "",
   updatedAt: "2026-08-03T00:00:00.000Z"
+  })
 };
 
 test("自动状态以可验证的版本关系判断，不猜测主观返工结论", () => {

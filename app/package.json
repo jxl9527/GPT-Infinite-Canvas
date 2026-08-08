@@ -1,6 +1,6 @@
 {
   "name": "gpt-infinite-canvas",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "workspaces": [
@@ -17,6 +17,7 @@
     "build:canvas": "npm run build --workspace @gpt-canvas/shared && npm run build --workspace @gpt-canvas/canvas-app",
     "check:canvas": "npm run check --workspace @gpt-canvas/shared && npm run check --workspace @gpt-canvas/canvas-app",
     "test:canvas": "npm run build --workspace @gpt-canvas/shared && npm run test --workspace @gpt-canvas/canvas-app",
+    "fixture:release": "node scripts/create-release-verification-fixture.mjs",
     "verify:release": "node scripts/verify-release.mjs",
     "package:release": "node scripts/package-release.mjs",
     "smoke:release": "node scripts/smoke-release.mjs"

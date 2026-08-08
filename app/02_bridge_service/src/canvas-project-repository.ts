@@ -27,9 +27,10 @@ function boundedString(value: unknown, field: string, maximum: number): string {
 }
 
 function validateProject(value: unknown): JsonObject {
-  if (!isRecord(value) || value.schemaVersion !== "1.0") {
+  if (!isRecord(value) || (value.schemaVersion !== "1.0" && value.schemaVersion !== "2.0")) {
     throw new ProtocolError("RECOVERY_REQUIRED", "画布项目 schemaVersion 无效");
   }
+  const isV3 = value.schemaVersion === "2.0";
   if (!/^project_[0-9a-f-]{36}$/.test(requiredString(value.projectId, "projectId"))) {
     throw new ProtocolError("INVALID_INPUT", "projectId 无效");
   }
@@ -111,9 +112,13 @@ function validateProject(value: unknown): JsonObject {
     const viewpoints = requiredArray(value.workflow.viewpoints, "workflow.viewpoints");
     const handoffs = requiredArray(value.workflow.handoffs, "workflow.handoffs");
     const viewpointIds = new Set<string>();
-    const stages = new Set(["stage-1", "stage-2", "stage-3", "stage-4", "final"]);
+    const stages = new Set(isV3
+      ? ["preflight", "scene-optimization", "final-glass", "completed"]
+      : ["stage-1", "stage-2", "stage-3", "stage-4", "final"]);
     const statuses = new Set(["not-started", "in-progress", "locked", "rework", "blocked"]);
-    const targets = new Set(["su", "d5", "gpt", "codex", "photoshop", "review"]);
+    const targets = new Set(isV3
+      ? ["su", "d5", "gpt", "codex", "review"]
+      : ["su", "d5", "gpt", "codex", "photoshop", "review"]);
     if (value.workflow.customGptUrl !== undefined) {
       const customGptUrl = boundedString(value.workflow.customGptUrl, "workflow.customGptUrl", 500);
       if (customGptUrl) {
@@ -152,6 +157,51 @@ function validateProject(value: unknown): JsonObject {
         const versionId = viewpoint[field];
         if (versionId !== null && !versionIds.has(String(versionId))) {
           throw new ProtocolError("RECOVERY_REQUIRED", `视角状态卡引用了不存在的版本：${String(versionId)}`);
+        }
+      }
+      if (isV3) {
+        if (!isRecord(viewpoint.preflight) || !isRecord(viewpoint.sceneOptimization) || !isRecord(viewpoint.finalGlass) || !isRecord(viewpoint.export)) {
+          throw new ProtocolError("RECOVERY_REQUIRED", "V3 视角缺少三阶段状态");
+        }
+        const versionFields = [
+          viewpoint.preflight.d5ViewVersionId,
+          viewpoint.preflight.suReferenceVersionId,
+          viewpoint.sceneOptimization.structureBaseVersionId,
+          viewpoint.sceneOptimization.styleReferenceVersionId,
+          viewpoint.sceneOptimization.selectedVersionId,
+          viewpoint.finalGlass.finalD5VersionId
+        ];
+        for (const versionId of versionFields) {
+          if (versionId !== null && versionId !== undefined && !versionIds.has(String(versionId))) {
+            throw new ProtocolError("RECOVERY_REQUIRED", `V3 视角引用了不存在的版本：${String(versionId)}`);
+          }
+        }
+        for (const field of [
+          viewpoint.sceneOptimization.candidateVersionIds,
+          viewpoint.finalGlass.candidateVersionIds,
+          viewpoint.finalGlass.selectedVersionIds,
+          viewpoint.export.exportedVersionIds
+        ]) {
+          for (const versionId of requiredArray(field, "V3 viewpoint version ids")) {
+            if (!versionIds.has(String(versionId))) {
+              throw new ProtocolError("RECOVERY_REQUIRED", `V3 视角列表引用了不存在的版本：${String(versionId)}`);
+            }
+          }
+        }
+        if (!new Set(["pending", "completed", "not-run", "external"]).has(String(viewpoint.preflight.status))) {
+          throw new ProtocolError("INVALID_INPUT", "前置阶段状态无效");
+        }
+        if (!new Set(["pending", "prompt-ready", "generated", "selected", "not-run"]).has(String(viewpoint.sceneOptimization.status))) {
+          throw new ProtocolError("INVALID_INPUT", "优化阶段状态无效");
+        }
+        if (!new Set(["pending", "generated", "selected", "not-run"]).has(String(viewpoint.finalGlass.status))) {
+          throw new ProtocolError("INVALID_INPUT", "最终阶段状态无效");
+        }
+        if (!new Set(["pending", "passed", "failed"]).has(String(viewpoint.finalGlass.validation))) {
+          throw new ProtocolError("INVALID_INPUT", "玻璃深化验收状态无效");
+        }
+        if (!new Set(["pending", "partial", "completed"]).has(String(viewpoint.export.status))) {
+          throw new ProtocolError("INVALID_INPUT", "导出状态无效");
         }
       }
     }

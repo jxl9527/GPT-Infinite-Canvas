@@ -221,8 +221,16 @@ export function createBridgeServer(options: BridgeServerOptions): Server {
       }
       if (request.method === "POST" && url.pathname === "/api/v1/canvas/delivery-target") {
         const body = await readJson(request);
-        if (!isRecord(body)) throw new ProtocolError("INVALID_INPUT", "正式交接目录请求必须是 JSON 对象");
-        send(response, 200, { ok: true, target: await project.delivery.saveTarget(body.aiDirectory) }); return;
+        if (!isRecord(body)) throw new ProtocolError("INVALID_INPUT", "批量导出目录请求必须是 JSON 对象");
+        send(response, 200, { ok: true, target: await project.delivery.saveTarget(body.targetDirectory) }); return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/v1/canvas/final-glass/batch-export") {
+        const body = await readJson(request);
+        if (!isRecord(body) || !Array.isArray(body.selections)) {
+          throw new ProtocolError("INVALID_INPUT", "最终玻璃批量导出请求必须包含 selections 数组");
+        }
+        const result = await project.delivery.exportSelected(body.selections);
+        send(response, result.completed ? 201 : 207, { ok: result.completed, export: result }); return;
       }
       if (request.method === "GET" && url.pathname === "/api/v1/canvas/project") {
         send(response, 200, { ok: true, project: project.canvasProject.read() }); return;
@@ -265,18 +273,6 @@ export function createBridgeServer(options: BridgeServerOptions): Server {
       const canvasAssetId = url.pathname.match(/^\/api\/v1\/canvas\/assets\/([^/]+)\/original$/)?.[1];
       if (request.method === "GET" && canvasAssetId) {
         sendCanvasAsset(response, await project.canvasAssets.readOriginal(decodeURIComponent(canvasAssetId))); return;
-      }
-      const adoptCanvasAssetId = url.pathname.match(/^\/api\/v1\/canvas\/assets\/([^/]+)\/adopt$/)?.[1];
-      if (request.method === "POST" && adoptCanvasAssetId) {
-        const body = await readJson(request);
-        if (!isRecord(body)) throw new ProtocolError("INVALID_INPUT", "正式归档请求必须是 JSON 对象");
-        const adoption = await project.delivery.adopt(decodeURIComponent(adoptCanvasAssetId), {
-          viewpointName: body.viewpointName,
-          stage: body.stage,
-          taskId: body.taskId,
-          versionId: body.versionId
-        });
-        send(response, adoption.deduplicated ? 200 : 201, { ok: true, adoption }); return;
       }
       const renditionMatch = url.pathname.match(/^\/api\/v1\/canvas\/assets\/([^/]+)\/(display|thumbnail)$/);
       if (request.method === "GET" && renditionMatch) {

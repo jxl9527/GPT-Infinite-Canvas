@@ -20,7 +20,6 @@ import "konva/lib/shapes/Text";
 import "konva/lib/shapes/Transformer";
 import {
   cancelGenerationTask,
-  adoptCanvasAsset,
   connectCanvasSession,
   createGenerationTask,
   downloadOriginalAsset,
@@ -36,6 +35,7 @@ import {
   readFileAsDataUrl,
   readGenerationResultAsDataUrl,
   readGenerationTask,
+  exportFinalGlassSelections,
   saveGeneratedAsset,
   saveDeliveryTarget,
   savePromptLibraryItem,
@@ -106,10 +106,12 @@ import {
   nextQueuedBatchItem,
   updateBatchItem,
   WORKFLOW_ACTION_LABELS,
+  WORKFLOW_STAGE_ACTIONS,
   type WorkflowAction
 } from "./batch-queue";
 import {
   buildCanvasProjectDocument,
+  createViewpointStatusCard,
   restoreCanvasProjectStructure,
   type CanvasBatchItem,
   type CanvasBatchRun,
@@ -184,11 +186,10 @@ const ATTACHMENT_ROLE_LABELS: Readonly<Record<ImageRole, string>> = {
 };
 
 const STAGE_SELECTION_HINTS: Readonly<Record<WorkflowStage, string>> = {
-  "stage-1": "选择1—3张候选视角，将在同一轮中对比并回写文字结论。",
-  "stage-2": "选择锁定D5视角和对应SU截图，并先把D5图设为结构基准。",
-  "stage-3": "每张底图单独处理；可先返回提示词卡，确认后再批量生成目标图。",
-  "stage-4": "每张最终D5图单独整图生成；无需蒙版，返回同画幅完整效果图。",
-  final: "逐张检查拟采用成果；如已指定结构基准，将同时进行结构对照。"
+  preflight: "每张已选D5视角独立分析；可为每张图明确配对一张SU截图，只返回文字。",
+  "scene-optimization": "每张结构底图独立处理；先返回提示词卡，只有用户明确发起才生成D5目标图。",
+  "final-glass": "每张最终D5完整图独立深化玻璃；无需蒙版或后期通道，返回完整画幅。",
+  completed: "已选玻璃深化成果全部成功导出后，画布任务完成。"
 };
 
 interface TextEditorState {
@@ -793,11 +794,10 @@ const PROVIDER_LABELS: Record<GenerationProvider, string> = {
 };
 
 const WORKFLOW_STAGE_LABELS: Record<WorkflowStage, string> = {
-  "stage-1": "阶段一｜相机与构图",
-  "stage-2": "阶段二｜SU可见细节",
-  "stage-3": "阶段三｜D5场景深化",
-  "stage-4": "阶段四｜玻璃与内透",
-  final: "最终成果"
+  preflight: "阶段一｜前置阶段",
+  "scene-optimization": "阶段二｜优化阶段",
+  "final-glass": "阶段三｜最终阶段",
+  completed: "画布任务已完成"
 };
 
 const VIEWPOINT_STATUS_LABELS: Record<ViewpointStatus, string> = {
@@ -813,25 +813,24 @@ const HANDOFF_TARGET_LABELS: Record<HandoffTarget, string> = {
   d5: "D5",
   gpt: "GPT",
   codex: "Codex",
-  photoshop: "Photoshop",
   review: "人工复核"
 };
 
 const WORKFLOW_STAGE_SHORT_LABELS: Record<WorkflowStage, string> = {
-  "stage-1": "阶段一",
-  "stage-2": "阶段二",
-  "stage-3": "阶段三",
-  "stage-4": "阶段四",
-  final: "最终成果"
+  preflight: "阶段一",
+  "scene-optimization": "阶段二",
+  "final-glass": "阶段三",
+  completed: "已完成"
 };
 
 const WORKFLOW_STAGE_CONTROL_LABELS: Record<WorkflowStage, string> = {
-  "stage-1": "阶段一｜相机构图",
-  "stage-2": "阶段二｜SU细节",
-  "stage-3": "阶段三｜D5深化",
-  "stage-4": "阶段四｜玻璃内透",
-  final: "最终成果"
+  preflight: "阶段一｜前置：构图＋SU细节",
+  "scene-optimization": "阶段二｜优化：提示词＋D5目标图",
+  "final-glass": "阶段三｜最终：玻璃深化＋导出",
+  completed: "画布任务已完成"
 };
+
+const USER_WORKFLOW_STAGES = ["preflight", "scene-optimization", "final-glass"] as const satisfies readonly WorkflowStage[];
 
 interface ImageWorkflowBadge {
   stage: WorkflowStage;
@@ -843,6 +842,48 @@ interface ImageWorkflowBadge {
 function defaultViewpointName(filename: string): string {
   const stem = filename.replace(/\.[^.]+$/, "").trim();
   return stem.replace(/_(AO|MaterialID|Transparent|SkyMask|Z-Depth|Reflection)$/i, "") || "未命名视角";
+}
+
+function viewpointAtStage(
+  viewpoint: ViewpointStatusCard,
+  stage: WorkflowStage,
+  sourceVersionId = viewpoint.sourceVersionId,
+  selectedVersionId = viewpoint.selectedVersionId
+): ViewpointStatusCard {
+  const next = structuredClone(viewpoint);
+  next.stage = stage;
+  next.sourceVersionId = sourceVersionId;
+  next.selectedVersionId = selectedVersionId;
+  if (stage === "preflight") {
+    next.preflight.d5ViewVersionId = sourceVersionId;
+    if (next.preflight.status === "not-run") next.preflight.status = "pending";
+  } else if (stage === "scene-optimization") {
+    next.sceneOptimization.structureBaseVersionId = sourceVersionId;
+    if (selectedVersionId) {
+      next.sceneOptimization.selectedVersionId = selectedVersionId;
+      if (!next.sceneOptimization.candidateVersionIds.includes(selectedVersionId)) {
+        next.sceneOptimization.candidateVersionIds.push(selectedVersionId);
+      }
+      next.sceneOptimization.status = "selected";
+    } else if (next.sceneOptimization.status === "not-run") {
+      next.sceneOptimization.status = "pending";
+    }
+  } else if (stage === "final-glass") {
+    next.finalGlass.finalD5VersionId = sourceVersionId;
+    if (selectedVersionId && !next.finalGlass.selectedVersionIds.includes(selectedVersionId)) {
+      next.finalGlass.selectedVersionIds.push(selectedVersionId);
+    }
+    if (selectedVersionId) {
+      if (!next.finalGlass.candidateVersionIds.includes(selectedVersionId)) {
+        next.finalGlass.candidateVersionIds.push(selectedVersionId);
+      }
+      next.finalGlass.validation = "passed";
+      next.finalGlass.status = "selected";
+    } else if (next.finalGlass.status === "not-run") {
+      next.finalGlass.status = "pending";
+    }
+  }
+  return next;
 }
 
 function handoffMarkdown(
@@ -972,7 +1013,8 @@ export function App({
   const [customGptEnabled, setCustomGptEnabled] = useState(false);
   const [customGptDraft, setCustomGptDraft] = useState(() => resolveFixedCustomGptUrl(readFixedCustomGptUrl(), ""));
   const [editingCustomGptTarget, setEditingCustomGptTarget] = useState(false);
-  const [bulkStage, setBulkStage] = useState<WorkflowStage>("stage-1");
+  const [bulkStage, setBulkStage] = useState<WorkflowStage>("preflight");
+  const [preflightPairVersionIds, setPreflightPairVersionIds] = useState<Record<string, `version_${string}` | "">>({});
   const [activeViewpointId, setActiveViewpointId] = useState<`viewpoint_${string}` | null>(null);
   const [handoffTarget, setHandoffTarget] = useState<HandoffTarget>("d5");
   const [promptLibrary, setPromptLibrary] = useState<PromptLibraryItem[]>([]);
@@ -1240,6 +1282,22 @@ export function App({
   const selectedWorkflowInference = selectedWorkflowViewpoint
     ? viewpointInferences.get(selectedWorkflowViewpoint.id) ?? null
     : null;
+  const activeWorkflowStage = selectedWorkflowViewpoint?.stage ?? bulkStage;
+  const finalGlassExportPreview = useMemo(() => viewpoints.flatMap((viewpoint) => (
+    viewpoint.finalGlass.selectedVersionIds.flatMap((versionId, selectionIndex) => {
+      const node = nodes.find((candidate) => candidate.versionId === versionId);
+      return node?.origin === "generated"
+        ? [{
+            assetId: node.assetId,
+            versionId: node.versionId,
+            viewpointName: viewpoint.name,
+            sourceName: node.name,
+            suggestedFilename: `${viewpoint.name}_玻璃整图_${String(selectionIndex + 1).padStart(2, "0")}`
+          }]
+        : [];
+    })
+  )), [nodes, viewpoints]);
+  const finalGlassSelectionCount = finalGlassExportPreview.length;
   const structureAnnotations = useMemo(() => structureBase
     ? annotations.filter((annotation) => annotationIntersectsRect(annotation, {
       x: structureBase.x,
@@ -1370,7 +1428,7 @@ export function App({
       readActiveProjectRequirements().then(setProjectRequirements),
       readDeliveryTarget().then((target) => {
         setDeliveryTarget(target);
-        setDeliveryTargetDraft(target?.aiDirectory ?? "");
+        setDeliveryTargetDraft(target?.targetDirectory ?? "");
       })
     ]).catch((error: unknown) => (
       setNotice(error instanceof Error ? error.message : "项目上下文读取失败")
@@ -2445,20 +2503,12 @@ export function App({
       setNotice("请先选择一张代表该视角的底图或成果图。");
       return;
     }
-    const viewpoint: ViewpointStatusCard = {
-      id: `viewpoint_${crypto.randomUUID()}`,
+    const viewpoint = createViewpointStatusCard({
       name: defaultViewpointName(selectedNode.name),
-      purpose: "",
-      stage: "stage-1",
-      status: "not-started",
-      statusMode: "auto",
-      d5Batch: "",
+      stage: "preflight",
       sourceVersionId: selectedNode.parentVersionId ?? selectedNode.versionId,
-      selectedVersionId: selectedNode.origin === "generated" ? selectedNode.versionId : null,
-      conclusion: "",
-      nextAction: "",
-      updatedAt: new Date().toISOString()
-    };
+      selectedVersionId: selectedNode.origin === "generated" ? selectedNode.versionId : null
+    });
     setViewpoints((current) => [...current, viewpoint]);
     setActiveViewpointId(viewpoint.id);
     setRevision((current) => current + 1);
@@ -2467,10 +2517,13 @@ export function App({
 
   const updateActiveViewpoint = useCallback((patch: Partial<ViewpointStatusCard>) => {
     if (!activeViewpointId) return;
-    setViewpoints((current) => current.map((viewpoint) => viewpoint.id === activeViewpointId
-      ? { ...viewpoint, ...patch, updatedAt: new Date().toISOString() }
-      : viewpoint
-    ));
+    setViewpoints((current) => current.map((viewpoint) => {
+      if (viewpoint.id !== activeViewpointId) return viewpoint;
+      const updated = { ...viewpoint, ...patch, updatedAt: new Date().toISOString() } as ViewpointStatusCard;
+      return patch.stage !== undefined || patch.sourceVersionId !== undefined || patch.selectedVersionId !== undefined
+        ? viewpointAtStage(updated, updated.stage, updated.sourceVersionId, updated.selectedVersionId)
+        : updated;
+    }));
     setRevision((current) => current + 1);
   }, [activeViewpointId]);
 
@@ -2488,27 +2541,23 @@ export function App({
       if (index >= 0) {
         const current = next[index]!;
         next[index] = {
-          ...current,
-          stage,
-          selectedVersionId: source.origin === "generated" ? source.versionId : current.selectedVersionId,
+          ...viewpointAtStage(
+            current,
+            stage,
+            sourceVersionId,
+            source.origin === "generated" ? source.versionId : current.selectedVersionId
+          ),
           updatedAt
         };
         firstViewpointId ??= current.id;
       } else {
-        const viewpoint: ViewpointStatusCard = {
-          id: `viewpoint_${crypto.randomUUID()}`,
+        const viewpoint = createViewpointStatusCard({
           name: defaultViewpointName(source.name),
-          purpose: "",
           stage,
-          status: "not-started",
-          statusMode: "auto",
-          d5Batch: "",
           sourceVersionId,
           selectedVersionId: source.origin === "generated" ? source.versionId : null,
-          conclusion: "",
-          nextAction: "",
           updatedAt
-        };
+        });
         next.push(viewpoint);
         firstViewpointId ??= viewpoint.id;
       }
@@ -2535,27 +2584,24 @@ export function App({
     setViewpoints((current) => {
       const index = current.findIndex((viewpoint) => viewpoint.id === nextActiveId);
       if (index >= 0) {
-        return current.map((viewpoint, currentIndex) => currentIndex === index
-          ? { ...viewpoint, ...patch, updatedAt }
-          : viewpoint
-        );
+        return current.map((viewpoint, currentIndex) => {
+          if (currentIndex !== index) return viewpoint;
+          const updated = { ...viewpoint, ...patch, updatedAt } as ViewpointStatusCard;
+          return patch.stage !== undefined || patch.sourceVersionId !== undefined || patch.selectedVersionId !== undefined
+            ? viewpointAtStage(updated, updated.stage, updated.sourceVersionId, updated.selectedVersionId)
+            : updated;
+        });
       }
-      const created: ViewpointStatusCard = {
+      const created = createViewpointStatusCard({
         id: nextActiveId,
         name: defaultViewpointName(selectedNode.name),
-        purpose: "",
-        stage: "stage-1",
-        status: "not-started",
-        statusMode: "auto",
-        d5Batch: "",
+        stage: "preflight",
         sourceVersionId,
         selectedVersionId: selectedNode.origin === "generated" ? selectedNode.versionId : null,
-        conclusion: "",
-        nextAction: "",
-        updatedAt,
-        ...patch
-      };
-      return [...current, created];
+        updatedAt
+      });
+      const patched = { ...created, ...patch, updatedAt } as ViewpointStatusCard;
+      return [...current, patch.stage ? viewpointAtStage(patched, patch.stage) : patched];
     });
     setActiveViewpointId(nextActiveId);
     setRevision((current) => current + 1);
@@ -2581,6 +2627,16 @@ export function App({
     try {
       applyStageToNodes(selectedBatchNodes, bulkStage, false);
       const prompt = workflowStagePrompt(bulkStage, workflowAction);
+      const suReferenceBySourceVersionId = new Map<`version_${string}`, ImageNodeState>();
+      if (bulkStage === "preflight") {
+        for (const source of selectedBatchNodes) {
+          const pairedVersionId = preflightPairVersionIds[source.versionId];
+          const paired = pairedVersionId
+            ? nodes.find((node) => node.versionId === pairedVersionId) ?? null
+            : null;
+          if (paired) suReferenceBySourceVersionId.set(source.versionId, paired);
+        }
+      }
       const run = createStageCanvasBatchRun({
         sources: selectedBatchNodes,
         stage: bulkStage,
@@ -2588,8 +2644,58 @@ export function App({
         prompt,
         structureBase,
         styleReference,
-        targetChatUrl: activeTargetChatUrl
+        targetChatUrl: activeTargetChatUrl,
+        suReferenceBySourceVersionId
       });
+      setViewpoints((current) => current.map((viewpoint) => {
+        const item = run.items.find((candidate) => {
+          const source = selectedBatchNodes.find((node) => node.versionId === candidate.sourceVersionId);
+          return source && (
+            viewpoint.sourceVersionId === (source.parentVersionId ?? source.versionId)
+            || viewpoint.selectedVersionId === source.versionId
+          );
+        });
+        if (!item) return viewpoint;
+        if (bulkStage === "preflight") {
+          return {
+            ...viewpoint,
+            preflight: {
+              ...viewpoint.preflight,
+              d5ViewVersionId: item.sourceVersionId,
+              suReferenceVersionId: item.attachmentRoles?.includes("su-reference")
+                ? item.attachmentVersionIds?.[1] ?? null
+                : null,
+              status: "pending"
+            },
+            updatedAt: new Date().toISOString()
+          };
+        }
+        if (bulkStage === "scene-optimization") {
+          return {
+            ...viewpoint,
+            sceneOptimization: {
+              ...viewpoint.sceneOptimization,
+              structureBaseVersionId: item.sourceVersionId,
+              styleReferenceVersionId: run.styleReferenceVersionId,
+              status: workflowAction === "prompt" ? "pending" : viewpoint.sceneOptimization.status
+            },
+            updatedAt: new Date().toISOString()
+          };
+        }
+        if (bulkStage === "final-glass") {
+          return {
+            ...viewpoint,
+            finalGlass: {
+              ...viewpoint.finalGlass,
+              finalD5VersionId: item.sourceVersionId,
+              validation: "pending",
+              status: "pending"
+            },
+            updatedAt: new Date().toISOString()
+          };
+        }
+        return viewpoint;
+      }));
       setBatchSourceVersionIds(selectedBatchNodes.map((node) => node.versionId));
       setBatchRun({ ...run, status: "running", updatedAt: new Date().toISOString() });
       setGenerationMode("reference-edit");
@@ -2607,6 +2713,8 @@ export function App({
     generationResultsPending,
     activeTargetChatUrl,
     generationTargetReady,
+    nodes,
+    preflightPairVersionIds,
     returningResults,
     selectedBatchNodes,
     structureBase,
@@ -2628,72 +2736,110 @@ export function App({
       setNotice("请选择视角卡和准备采用的成果图。");
       return;
     }
+    if (activeViewpoint.stage === "final-glass") {
+      if (activeViewpoint.finalGlass.validation !== "passed") {
+        setNotice("请先完成玻璃深化验收；只有验收通过的结果可以加入待导出集合。");
+        return;
+      }
+      const selectedVersionIds = activeViewpoint.finalGlass.selectedVersionIds.includes(selectedNode.versionId)
+        ? activeViewpoint.finalGlass.selectedVersionIds.filter((versionId) => versionId !== selectedNode.versionId)
+        : [...activeViewpoint.finalGlass.selectedVersionIds, selectedNode.versionId];
+      updateActiveViewpoint({
+        selectedVersionId: selectedVersionIds.at(-1) ?? null,
+        finalGlass: {
+          ...activeViewpoint.finalGlass,
+          candidateVersionIds: [...new Set([...activeViewpoint.finalGlass.candidateVersionIds, selectedNode.versionId])],
+          selectedVersionIds,
+          status: selectedVersionIds.length ? "selected" : "generated"
+        }
+      });
+      setNotice(selectedVersionIds.includes(selectedNode.versionId)
+        ? `${selectedNode.name} 已加入最终玻璃待导出集合。`
+        : `${selectedNode.name} 已从最终玻璃待导出集合移除。`);
+      return;
+    }
     updateActiveViewpoint({ selectedVersionId: selectedNode.versionId });
-    setNotice(`${selectedNode.name} 已在画布登记为“${activeViewpoint.name}”的采用候选；正式写入项目请使用“采用归档”。`);
+    setNotice(`${selectedNode.name} 已登记为“${activeViewpoint.name}”的D5场景目标图。`);
   }, [activeViewpoint, selectedNode, updateActiveViewpoint]);
 
   const commitDeliveryTarget = useCallback(async () => {
     if (savingDeliveryTarget || !deliveryTargetDraft.trim()) {
-      setNotice("请粘贴正式效果图目录下、以 AI 结尾的绝对路径。");
+      setNotice("请粘贴最终玻璃成果的导出文件夹绝对路径。");
       return;
     }
     setSavingDeliveryTarget(true);
     try {
       const target = await saveDeliveryTarget(deliveryTargetDraft);
       setDeliveryTarget(target);
-      setDeliveryTargetDraft(target.aiDirectory);
-      setNotice("正式交接目录已保存；AI 与同级成图目录均已核对。原配置已备份。");
+      setDeliveryTargetDraft(target.targetDirectory);
+      setNotice("最终玻璃批量导出文件夹已保存；原配置已备份。");
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "正式交接目录保存失败");
+      setNotice(error instanceof Error ? error.message : "批量导出目录保存失败");
     } finally {
       setSavingDeliveryTarget(false);
     }
   }, [deliveryTargetDraft, savingDeliveryTarget]);
 
-  const adoptSelectedToProject = useCallback(async () => {
-    if (!selectedNode || selectedNode.origin !== "generated") {
-      setNotice("请选择已由 GPT 生成并回收到画布的成果图。");
-      return;
-    }
-    if (!selectedWorkflowViewpoint) {
-      setNotice("请先给当前成果建立视角状态卡并设置实际工作流阶段。");
-      return;
-    }
-    if (!(["stage-3", "stage-4", "final"] as WorkflowStage[]).includes(selectedWorkflowViewpoint.stage)) {
-      setNotice("当前阶段只产生判断结论，不应归档为正式 AI 图片；请在阶段 3、阶段 4 或最终检查中采用。");
-      return;
-    }
+  const exportSelectedFinalGlass = useCallback(async () => {
     if (!deliveryTarget) {
-      setNotice("请先设置正式效果图项目的 AI 目录。");
+      setNotice("请先设置最终玻璃成果的导出文件夹。");
+      return;
+    }
+    const selections = finalGlassExportPreview.map(({ assetId, versionId, viewpointName }) => ({
+      assetId,
+      versionId,
+      viewpointName
+    }));
+    if (!selections.length) {
+      setNotice("请先验收并选择至少一张玻璃深化图。");
       return;
     }
     if (adoptingToProject) return;
     setAdoptingToProject(true);
     try {
-      const adoption = await adoptCanvasAsset({
-        assetId: selectedNode.assetId,
-        viewpointName: selectedWorkflowViewpoint.name,
-        stage: selectedWorkflowViewpoint.stage as "stage-3" | "stage-4" | "final",
-        taskId: selectedNode.taskId,
-        versionId: selectedNode.versionId
-      });
-      updateSelectedNodeWorkflow(
-        { selectedVersionId: selectedNode.versionId },
-        adoption.deduplicated
-          ? `该成果已归档：${adoption.filename}`
-          : `已采用并归档：${adoption.filename}`
-      );
+      const result = await exportFinalGlassSelections(selections);
+      const successful = new Map(result.records
+        .filter((record) => record.status !== "failed")
+        .map((record) => [record.versionId, record]));
+      setViewpoints((current) => current.map((viewpoint) => {
+        const selectedVersionIds = viewpoint.finalGlass.selectedVersionIds;
+        if (!selectedVersionIds.length) return viewpoint;
+        const records = selectedVersionIds.flatMap((versionId) => {
+          const record = successful.get(versionId);
+          return record ? [record] : [];
+        });
+        const exportedVersionIds = [...new Set([
+          ...viewpoint.export.exportedVersionIds,
+          ...records.map((record) => record.versionId)
+        ])];
+        const complete = selectedVersionIds.every((versionId) => exportedVersionIds.includes(versionId));
+        return {
+          ...viewpoint,
+          stage: complete ? "completed" : viewpoint.stage,
+          export: {
+            targetDirectory: result.targetDirectory,
+            exportedVersionIds,
+            exportedFiles: [...new Set([...viewpoint.export.exportedFiles, ...records.map((record) => record.destinationPath)])],
+            exportedAt: records.length ? new Date().toISOString() : viewpoint.export.exportedAt,
+            status: complete ? "completed" : records.length ? "partial" : viewpoint.export.status
+          },
+          updatedAt: new Date().toISOString()
+        };
+      }));
+      setRevision((current) => current + 1);
+      setNotice(result.completed
+        ? `批量导出完成：新增 ${result.exported} 张，已存在 ${result.deduplicated} 张。画布任务结束。`
+        : `批量导出部分完成：成功 ${result.exported + result.deduplicated} 张，失败 ${result.failed} 张；可修正后继续导出剩余文件。`);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "正式归档失败");
+      setNotice(error instanceof Error ? error.message : "最终玻璃批量导出失败");
     } finally {
       setAdoptingToProject(false);
     }
   }, [
     adoptingToProject,
     deliveryTarget,
-    selectedNode,
-    selectedWorkflowViewpoint,
-    updateSelectedNodeWorkflow
+    finalGlassExportPreview,
+    viewpoints
   ]);
 
   const createHandoffRecord = useCallback(() => {
@@ -3083,15 +3229,23 @@ export function App({
       }
       const conclusion = workflowConclusionFromText(generationTask.textResult.text);
       setViewpoints((current) => current.map((viewpoint) => relatedVersionIds.has(viewpoint.sourceVersionId ?? "version_missing")
-        ? {
-          ...viewpoint,
-          conclusion,
-          nextAction: kind === "prompt" ? "确认提示词后选择“按提示词生成图片”。" : "按本轮结论调整后继续下一阶段。",
-          updatedAt: new Date().toISOString()
-        }
+        ? (() => {
+          const updated = {
+            ...viewpoint,
+            conclusion,
+            nextAction: kind === "prompt" ? "确认提示词后选择“按提示词生成图片”。" : "按本轮结论调整 SU 或 D5。",
+            updatedAt: new Date().toISOString()
+          };
+          if (batchRun?.workflowStage === "preflight") {
+            updated.preflight = { ...updated.preflight, conclusionCardId: card.id, status: "completed" };
+          } else if (batchRun?.workflowStage === "scene-optimization" && kind === "prompt") {
+            updated.sceneOptimization = { ...updated.sceneOptimization, promptCardId: card.id, status: "prompt-ready" };
+          }
+          return updated;
+        })()
         : viewpoint));
       setBatchRun((current) => current && item
-        ? updateBatchItem(current, item.id, { status: "completed", error: "" })
+        ? updateBatchItem(current, item.id, { status: "completed", error: "", resultTextCardId: card.id })
         : current);
       setRevision((current) => current + 1);
       setNotice(`${source?.name ?? "当前任务"} 的${kind === "prompt" ? "提示词" : "文字审查"}已作为可编辑文字卡返回画布。`);
@@ -3163,8 +3317,8 @@ export function App({
       const children: ImageNodeState[] = [];
       const activeBatchItem = batchRun?.items.find((item) => item.taskId === generationTask.id) ?? null;
       const isGlassFullFrameTask = (
-        batchRun?.workflowStage === "stage-4" && Boolean(activeBatchItem)
-      ) || generationTask.prompt.includes("阶段四｜整图玻璃深化");
+        batchRun?.workflowStage === "final-glass" && Boolean(activeBatchItem)
+      ) || generationTask.prompt.includes("最终阶段·整图玻璃深化");
       for (const [index, result] of pending.entries()) {
         const dataUrl = await readGenerationResultAsDataUrl(generationTask.id, result.id);
         const rawImported = await saveGeneratedAsset(result.filename, dataUrl);
@@ -3227,6 +3381,44 @@ export function App({
         children.push({ ...child, x: child.x + index * (frame.width + 64) });
       }
       setNodes((current) => [...current, ...children]);
+      if (parent && children.length) {
+        setViewpoints((current) => current.map((viewpoint) => {
+          if (
+            viewpoint.sourceVersionId !== (parent.parentVersionId ?? parent.versionId)
+            && viewpoint.selectedVersionId !== parent.versionId
+          ) return viewpoint;
+          if (batchRun?.workflowStage === "scene-optimization") {
+            return {
+              ...viewpoint,
+              sceneOptimization: {
+                ...viewpoint.sceneOptimization,
+                candidateVersionIds: [...new Set([
+                  ...viewpoint.sceneOptimization.candidateVersionIds,
+                  ...children.map((child) => child.versionId)
+                ])],
+                status: "generated"
+              },
+              updatedAt: new Date().toISOString()
+            };
+          }
+          if (batchRun?.workflowStage === "final-glass") {
+            return {
+              ...viewpoint,
+              finalGlass: {
+                ...viewpoint.finalGlass,
+                candidateVersionIds: [...new Set([
+                  ...viewpoint.finalGlass.candidateVersionIds,
+                  ...children.map((child) => child.versionId)
+                ])],
+                validation: "pending",
+                status: "generated"
+              },
+              updatedAt: new Date().toISOString()
+            };
+          }
+          return viewpoint;
+        }));
+      }
       setReturnedResultIds((current) => [...current, ...pending.map((result) => result.id)]);
       setBatchRun((current) => {
         if (!current) return current;
@@ -3259,7 +3451,7 @@ export function App({
       setViewport(fitRect(size, bounds, 72));
       setNotice(parent
         ? isGlassFullFrameTask
-          ? `${children.length} 张玻璃整图已返回；比例已核对，像素尺寸不同的版本已生成PS对齐副本。`
+          ? `${children.length} 张玻璃整图已返回；比例已核对，像素尺寸不同的版本已生成同尺寸对齐副本。`
           : `${children.length} 张结果已放到父节点右侧并自动选中；可用图片上方工具栏下载原图或指定任务角色。`
         : `${children.length} 张文生图结果已回收到画布并自动选中；可用图片上方工具栏继续操作。`);
     } catch (error) {
@@ -3748,13 +3940,18 @@ export function App({
               <select
                 aria-label={`${selectedNode.name}的工作流阶段`}
                 value={selectedWorkflowViewpoint?.stage ?? ""}
-                onChange={(event) => updateSelectedNodeWorkflow(
-                  { stage: event.target.value as WorkflowStage },
-                  `“${defaultViewpointName(selectedNode.name)}”已更新为${WORKFLOW_STAGE_LABELS[event.target.value as WorkflowStage]}。`
-                )}
+                onChange={(event) => {
+                  const stage = event.target.value as WorkflowStage;
+                  updateSelectedNodeWorkflow(
+                    { stage },
+                    `“${defaultViewpointName(selectedNode.name)}”已更新为${WORKFLOW_STAGE_LABELS[stage]}。`
+                  );
+                  setBulkStage(stage);
+                  setWorkflowAction(defaultWorkflowAction(stage));
+                }}
               >
                 <option value="" disabled>设置阶段</option>
-                {(Object.keys(WORKFLOW_STAGE_CONTROL_LABELS) as WorkflowStage[]).map((stage) => (
+                {USER_WORKFLOW_STAGES.map((stage) => (
                   <option key={stage} value={stage}>{WORKFLOW_STAGE_SHORT_LABELS[stage]}</option>
                 ))}
               </select>
@@ -3788,12 +3985,37 @@ export function App({
             <button
               type="button"
               className="context-adopt"
-              data-active={selectedWorkflowViewpoint?.selectedVersionId === selectedNode.versionId}
-              title="只登记画布采用状态；正式写入请使用采用归档"
-              onClick={() => updateSelectedNodeWorkflow(
-                { selectedVersionId: selectedNode.versionId },
-                `“${selectedNode.name}”已标记为画布采用候选；正式写入项目请使用“采用归档”。`
-              )}
+              data-active={selectedWorkflowViewpoint?.stage === "final-glass"
+                ? selectedWorkflowViewpoint.finalGlass.selectedVersionIds.includes(selectedNode.versionId)
+                : selectedWorkflowViewpoint?.selectedVersionId === selectedNode.versionId}
+              title="优化阶段登记D5目标图；最终阶段把验收通过的玻璃图加入待导出集合"
+              onClick={() => {
+                if (selectedWorkflowViewpoint?.stage === "final-glass") {
+                  if (selectedWorkflowViewpoint.finalGlass.validation !== "passed") {
+                    setNotice("请先在视角卡中完成人工验收，再选择最终玻璃成果。");
+                    return;
+                  }
+                  const selectedVersionIds = selectedWorkflowViewpoint.finalGlass.selectedVersionIds.includes(selectedNode.versionId)
+                    ? selectedWorkflowViewpoint.finalGlass.selectedVersionIds.filter((versionId) => versionId !== selectedNode.versionId)
+                    : [...selectedWorkflowViewpoint.finalGlass.selectedVersionIds, selectedNode.versionId];
+                  updateSelectedNodeWorkflow({
+                    selectedVersionId: selectedVersionIds.at(-1) ?? null,
+                    finalGlass: {
+                      ...selectedWorkflowViewpoint.finalGlass,
+                      candidateVersionIds: [...new Set([...selectedWorkflowViewpoint.finalGlass.candidateVersionIds, selectedNode.versionId])],
+                      selectedVersionIds,
+                      status: selectedVersionIds.length ? "selected" : "generated"
+                    }
+                  }, selectedVersionIds.includes(selectedNode.versionId)
+                    ? `“${selectedNode.name}”已加入最终玻璃待导出集合。`
+                    : `“${selectedNode.name}”已移出最终玻璃待导出集合。`);
+                  return;
+                }
+                updateSelectedNodeWorkflow(
+                  { selectedVersionId: selectedNode.versionId },
+                  `“${selectedNode.name}”已标记为当前阶段采用候选。`
+                );
+              }}
             >
               <span className="context-check" aria-hidden="true">✓</span>
               <span className="context-label">标记采用</span>
@@ -3946,13 +4168,36 @@ export function App({
               <label>
                 <span>统一阶段</span>
                 <select value={bulkStage} onChange={(event) => changeBulkStage(event.target.value as WorkflowStage)}>
-                  {Object.entries(WORKFLOW_STAGE_LABELS).map(([value, label]) => (
-                    <option key={value} value={value}>{label}</option>
+                  {USER_WORKFLOW_STAGES.map((stage) => (
+                    <option key={stage} value={stage}>{WORKFLOW_STAGE_LABELS[stage]}</option>
                   ))}
                 </select>
               </label>
+              {bulkStage === "preflight" && (
+                <div className="preflight-pairing-list" aria-label="D5与SU一对一配对">
+                  <strong>D5／SU 配对（SU可选）</strong>
+                  <small>框选项均作为独立D5视角；SU截图请在对应行选择，不要把SU截图加入框选。</small>
+                  {selectedBatchNodes.map((source) => (
+                    <label key={source.versionId}>
+                      <span>{source.name}</span>
+                      <select
+                        value={preflightPairVersionIds[source.versionId] ?? ""}
+                        onChange={(event) => setPreflightPairVersionIds((current) => ({
+                          ...current,
+                          [source.versionId]: event.target.value as `version_${string}` | ""
+                        }))}
+                      >
+                        <option value="">无SU截图，仅审查可见画面</option>
+                        {nodes.filter((candidate) => candidate.versionId !== source.versionId).map((candidate) => (
+                          <option key={candidate.versionId} value={candidate.versionId}>{candidate.name}</option>
+                        ))}
+                      </select>
+                    </label>
+                  ))}
+                </div>
+              )}
               <div className="workflow-action-selector" role="radiogroup" aria-label="本轮GPT动作">
-                {(Object.keys(WORKFLOW_ACTION_LABELS) as WorkflowAction[]).map((action) => (
+                {WORKFLOW_STAGE_ACTIONS[bulkStage].map((action) => (
                   <button
                     key={action}
                     type="button"
@@ -3974,6 +4219,7 @@ export function App({
                     || generationResultsPending
                     || creatingTask
                     || returningResults
+                    || bulkStage === "completed"
                     || Boolean(batchRun && batchRun.status !== "completed")
                   }
                   onClick={sendSelectionToGpt}
@@ -4039,10 +4285,16 @@ export function App({
                   <span>当前阶段</span>
                   <select
                     value={activeViewpoint.stage}
-                    onChange={(event) => updateActiveViewpoint({ stage: event.target.value as WorkflowStage })}
+                    onChange={(event) => {
+                      const stage = event.target.value as WorkflowStage;
+                      updateActiveViewpoint({ stage });
+                      setBulkStage(stage);
+                      setWorkflowAction(defaultWorkflowAction(stage));
+                    }}
                   >
-                    {Object.entries(WORKFLOW_STAGE_CONTROL_LABELS).map(([value, label]) => (
-                      <option key={value} value={value}>{label}</option>
+                    {activeViewpoint.stage === "completed" && <option value="completed" disabled>{WORKFLOW_STAGE_CONTROL_LABELS.completed}</option>}
+                    {USER_WORKFLOW_STAGES.map((stage) => (
+                      <option key={stage} value={stage}>{WORKFLOW_STAGE_CONTROL_LABELS[stage]}</option>
                     ))}
                   </select>
                 </label>
@@ -4089,6 +4341,43 @@ export function App({
                   >标记当前成果</button>
                 </div>
               </div>
+
+              <div className="v3-stage-summary" aria-label="三阶段状态">
+                <div><span>前置建议</span><strong>{activeViewpoint.preflight.status === "completed" ? "已返回" : activeViewpoint.preflight.status === "external" ? "外部完成" : "未执行"}</strong></div>
+                <div><span>场景目标</span><strong>{activeViewpoint.sceneOptimization.status === "selected" ? "已选定" : activeViewpoint.sceneOptimization.status === "generated" ? "待选择" : activeViewpoint.sceneOptimization.status === "prompt-ready" ? "提示词已返回" : "未执行"}</strong></div>
+                <div><span>最终D5</span><strong>{activeViewpoint.finalGlass.finalD5VersionId ? "已登记" : "未登记"}</strong></div>
+                <div><span>玻璃深化</span><strong>{activeViewpoint.finalGlass.status === "selected" ? "已选择" : activeViewpoint.finalGlass.status === "generated" ? "待验收" : "未执行"}</strong></div>
+                <div><span>导出状态</span><strong>{activeViewpoint.export.status === "completed" ? "已导出" : activeViewpoint.export.status === "partial" ? "部分完成" : "待导出"}</strong></div>
+              </div>
+
+              {activeViewpoint.stage === "final-glass" && activeViewpoint.finalGlass.candidateVersionIds.length > 0 && (
+                <div className="glass-validation-control">
+                  <span>玻璃深化验收</span>
+                  <div role="radiogroup" aria-label="玻璃深化验收结果">
+                    {(["pending", "passed", "failed"] as const).map((validation) => (
+                      <button
+                        key={validation}
+                        type="button"
+                        role="radio"
+                        aria-checked={activeViewpoint.finalGlass.validation === validation}
+                        data-active={activeViewpoint.finalGlass.validation === validation}
+                        onClick={() => updateActiveViewpoint({
+                          finalGlass: {
+                            ...activeViewpoint.finalGlass,
+                            validation,
+                            selectedVersionIds: validation === "passed" ? activeViewpoint.finalGlass.selectedVersionIds : []
+                          },
+                          selectedVersionId: validation === "passed" ? activeViewpoint.selectedVersionId : null,
+                          status: validation === "failed" ? "rework" : activeViewpoint.status
+                        })}
+                      >
+                        {validation === "pending" ? "待验收" : validation === "passed" ? "验收通过" : "验收失败"}
+                      </button>
+                    ))}
+                  </div>
+                  <small>宽高比已自动校验；请人工确认没有裁切、扩图、结构或配景漂移。</small>
+                </div>
+              )}
 
               <details className="viewpoint-details">
                 <summary>
@@ -4231,7 +4520,7 @@ export function App({
                 onClick={() => setWorkbenchPanel((current) => current === "delivery" ? null : "delivery")}
               >
                 <b aria-hidden="true">✓</b>
-                <span>采用归档</span>
+                <span>最终导出</span>
                 <small>{deliveryTarget ? "已配置" : "待配置"}</small>
               </button>
             </nav>
@@ -4418,13 +4707,36 @@ export function App({
               <label>
                 <span>统一阶段</span>
                 <select value={bulkStage} onChange={(event) => changeBulkStage(event.target.value as WorkflowStage)}>
-                  {(Object.keys(WORKFLOW_STAGE_LABELS) as WorkflowStage[]).map((stage) => (
+                  {USER_WORKFLOW_STAGES.map((stage) => (
                     <option key={stage} value={stage}>{WORKFLOW_STAGE_LABELS[stage]}</option>
                   ))}
                 </select>
               </label>
+              {bulkStage === "preflight" && (
+                <div className="preflight-pairing-list" aria-label="D5与SU一对一配对">
+                  <strong>D5／SU 配对（SU可选）</strong>
+                  <small>框选项均作为独立D5视角；SU截图请在对应行选择。</small>
+                  {selectedBatchNodes.map((source) => (
+                    <label key={source.versionId}>
+                      <span>{source.name}</span>
+                      <select
+                        value={preflightPairVersionIds[source.versionId] ?? ""}
+                        onChange={(event) => setPreflightPairVersionIds((current) => ({
+                          ...current,
+                          [source.versionId]: event.target.value as `version_${string}` | ""
+                        }))}
+                      >
+                        <option value="">无SU截图，仅审查可见画面</option>
+                        {nodes.filter((candidate) => candidate.versionId !== source.versionId).map((candidate) => (
+                          <option key={candidate.versionId} value={candidate.versionId}>{candidate.name}</option>
+                        ))}
+                      </select>
+                    </label>
+                  ))}
+                </div>
+              )}
               <div className="workflow-action-selector" role="radiogroup" aria-label="本轮GPT动作">
-                {(Object.keys(WORKFLOW_ACTION_LABELS) as WorkflowAction[]).map((action) => (
+                {WORKFLOW_STAGE_ACTIONS[bulkStage].map((action) => (
                   <button key={action} type="button" role="radio" aria-checked={workflowAction === action} data-active={workflowAction === action} onClick={() => setWorkflowAction(action)}>
                     {WORKFLOW_ACTION_LABELS[action]}
                   </button>
@@ -4435,7 +4747,7 @@ export function App({
                 <button
                   type="button"
                   className="task-create"
-                  disabled={!generationTargetReady || !automationReady || creatingTask || returningResults}
+                  disabled={!generationTargetReady || !automationReady || creatingTask || returningResults || bulkStage === "completed"}
                   onClick={sendSelectionToGpt}
                 >{`组合并发送到${activeTargetChatUrl ? "专属" : "普通"} GPT`}</button>
               </div>
@@ -4473,7 +4785,7 @@ export function App({
               </button>
             </>
           )}
-          <p className="submission-boundary">固定使用 GPT 参考图改图；严格串行，登录失效、网页验证或失败时自动暂停。</p>
+          <p className="submission-boundary">按当前阶段分别执行文字审查、提示词或图片生成；严格串行，登录失效、网页验证或失败时自动暂停。</p>
         </section>
 
         <section className="prompt-section compact-section">
@@ -4560,7 +4872,7 @@ export function App({
           </div>
 
           <div className="workflow-action-selector workflow-action-selector-wide" role="radiogroup" aria-label="GPT任务动作">
-            {(Object.keys(WORKFLOW_ACTION_LABELS) as WorkflowAction[]).map((action) => (
+            {WORKFLOW_STAGE_ACTIONS[activeWorkflowStage].map((action) => (
               <button
                 key={action}
                 type="button"
@@ -4673,29 +4985,38 @@ export function App({
 
         </section>
 
-        <section className="delivery-section compact-section" aria-label="采用成果并正式归档">
+        <section className="delivery-section compact-section" aria-label="最终玻璃成果批量导出">
           <div className="task-heading">
             <div>
-              <p className="section-kicker">ADOPT &amp; ARCHIVE</p>
-              <h3>采用成果并归档</h3>
+              <p className="section-kicker">FINAL GLASS EXPORT</p>
+              <h3>最终玻璃批量导出</h3>
             </div>
-            <span>{deliveryTarget ? "目录已锁定" : "待设置"}</span>
+            <span>{finalGlassSelectionCount} 张待导出</span>
           </div>
-          <div className="delivery-candidate" data-ready={selectedNode?.origin === "generated"}>
-            <span>当前候选</span>
-            <strong>{selectedNode?.name ?? "请先选择画布成果"}</strong>
+          <div className="delivery-candidate" data-ready={finalGlassSelectionCount > 0}>
+            <span>选定成果</span>
+            <strong>{finalGlassSelectionCount ? `${finalGlassSelectionCount} 张玻璃深化图` : "尚未选择玻璃深化图"}</strong>
             <small>
-              {selectedWorkflowViewpoint
-                ? `${WORKFLOW_STAGE_LABELS[selectedWorkflowViewpoint.stage]} · ${selectedWorkflowViewpoint.name}`
-                : "尚未关联视角状态卡"}
+              只有最终阶段验收通过并由用户明确选定的版本会进入导出清单
             </small>
           </div>
+          {finalGlassExportPreview.length > 0 && (
+            <ol className="final-export-preview" aria-label="待导出玻璃深化图清单">
+              {finalGlassExportPreview.map((item, index) => (
+                <li key={`${item.versionId}-${index}`}>
+                  <span>{item.viewpointName}</span>
+                  <strong>{item.sourceName}</strong>
+                  <small>{`${item.suggestedFilename}（实际序号按同名文件顺延）`}</small>
+                </li>
+              ))}
+            </ol>
+          )}
           <div className="delivery-target">
             <label>
-              <span>正式效果图 AI 目录</span>
+              <span>用户指定导出文件夹</span>
               <input
                 value={deliveryTargetDraft}
-                placeholder="D:\\正式项目\\01投标阶段\\效果图\\AI"
+                placeholder="D:\\项目成果\\玻璃深化"
                 onChange={(event) => setDeliveryTargetDraft(event.target.value)}
               />
             </label>
@@ -4704,12 +5025,12 @@ export function App({
               disabled={savingDeliveryTarget || !deliveryTargetDraft.trim()}
               onClick={() => void commitDeliveryTarget()}
             >
-              {savingDeliveryTarget ? "核对中…" : deliveryTarget ? "更新目录" : "设置目录"}
+              {savingDeliveryTarget ? "核对中…" : deliveryTarget ? "更新文件夹" : "设置文件夹"}
             </button>
-            <small>目录必须由项目明确指定并以 AI 结尾；同时核对同级“成图”，不扫描其他项目。</small>
+            <small>使用绝对路径；不要求固定目录名称，不扫描其他项目，不覆盖已有文件。</small>
           </div>
           {deliveryTarget && (
-            <p className="delivery-path" title={deliveryTarget.aiDirectory}>{deliveryTarget.aiDirectory}</p>
+            <p className="delivery-path" title={deliveryTarget.targetDirectory}>{deliveryTarget.targetDirectory}</p>
           )}
           <button
             type="button"
@@ -4717,19 +5038,15 @@ export function App({
             disabled={
               adoptingToProject
               || !deliveryTarget
-              || selectedNode?.origin !== "generated"
-              || !selectedWorkflowViewpoint
-              || !["stage-3", "stage-4", "final"].includes(selectedWorkflowViewpoint.stage)
+              || finalGlassSelectionCount === 0
             }
-            onClick={() => void adoptSelectedToProject()}
+            onClick={() => void exportSelectedFinalGlass()}
           >
             {adoptingToProject
-              ? "正在安全归档…"
-              : selectedWorkflowViewpoint?.stage === "stage-4"
-                ? "采用玻璃整图并归档"
-                : "采用为正式 AI 版本并归档"}
+              ? "正在批量导出…"
+              : `批量导出 ${finalGlassSelectionCount} 张选定成果`}
           </button>
-          <p className="submission-boundary">常规成果按“视角名_01”顺延；阶段四整图使用“视角名_玻璃整图_01”，不会混入常规D5版本。</p>
+          <p className="submission-boundary">文件按“视角名_玻璃整图_01”顺延；部分失败时保留成功记录，可继续导出剩余文件。全部成功后画布任务结束。</p>
         </section>
 
           </div>
