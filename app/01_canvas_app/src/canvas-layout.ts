@@ -25,6 +25,69 @@ export interface CanvasRelation {
   points: [number, number, number, number, number, number, number, number];
 }
 
+export interface ImageContextToolbarPlacement {
+  left: number;
+  top: number;
+  width: number;
+  placement: "above" | "below";
+}
+
+export function placeImageContextToolbar(
+  node: Pick<ImageNodeState, "x" | "y" | "width" | "height">,
+  viewport: { x: number; y: number; scale: number },
+  canvas: { width: number; height: number },
+  options: {
+    minWidth?: number;
+    maxWidth?: number;
+    height?: number;
+    gap?: number;
+    padding?: number;
+  } = {}
+): ImageContextToolbarPlacement | null {
+  const minWidth = options.minWidth ?? 330;
+  const maxWidth = options.maxWidth ?? 460;
+  const toolbarHeight = options.height ?? 54;
+  const gap = options.gap ?? 10;
+  const padding = options.padding ?? 12;
+  const nodeLeft = viewport.x + node.x * viewport.scale;
+  const nodeTop = viewport.y + node.y * viewport.scale;
+  const nodeWidth = node.width * viewport.scale;
+  const nodeHeight = node.height * viewport.scale;
+  const nodeRight = nodeLeft + nodeWidth;
+  const nodeBottom = nodeTop + nodeHeight;
+
+  if (
+    canvas.width <= padding * 2
+    || canvas.height <= toolbarHeight + padding * 2
+    || nodeRight <= 0
+    || nodeBottom <= 0
+    || nodeLeft >= canvas.width
+    || nodeTop >= canvas.height
+  ) {
+    return null;
+  }
+
+  const availableWidth = canvas.width - padding * 2;
+  const width = Math.min(
+    availableWidth,
+    Math.max(Math.min(minWidth, availableWidth), Math.min(maxWidth, nodeWidth))
+  );
+  const preferredLeft = nodeLeft + (nodeWidth - width) / 2;
+  const left = Math.max(padding, Math.min(preferredLeft, canvas.width - width - padding));
+  const aboveTop = nodeTop - gap - toolbarHeight;
+  if (aboveTop >= padding) {
+    return { left, top: aboveTop, width, placement: "above" };
+  }
+
+  const belowTop = nodeBottom + gap;
+  return {
+    left,
+    top: Math.max(padding, Math.min(belowTop, canvas.height - toolbarHeight - padding)),
+    width,
+    placement: "below"
+  };
+}
+
 export function buildCanvasRelation(
   parent: Pick<ImageNodeState, "x" | "y" | "width" | "height">,
   child: Pick<ImageNodeState, "x" | "y" | "width" | "height">,
@@ -122,6 +185,19 @@ export function arrangeHorizontally(
   return nodes.map((node) => {
     const next = { ...node, x: cursor, y: start.y };
     cursor += node.width + gap;
+    return next;
+  });
+}
+
+export function arrangeVertically(
+  nodes: readonly ImageNodeState[],
+  start = { x: 120, y: 120 },
+  gap = 96
+): ImageNodeState[] {
+  let cursor = start.y;
+  return nodes.map((node) => {
+    const next = { ...node, x: start.x, y: cursor };
+    cursor += node.height + gap;
     return next;
   });
 }

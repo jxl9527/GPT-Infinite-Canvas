@@ -190,6 +190,12 @@ export function createBridgeServer(options: BridgeServerOptions): Server {
         });
         return;
       }
+      const deleteProjectId = url.pathname.match(/^\/api\/v1\/workbench\/projects\/([^/]+)\/delete$/)?.[1];
+      if (request.method === "POST" && deleteProjectId) {
+        const deleted = await options.projects.deleteProject(decodeURIComponent(deleteProjectId));
+        send(response, 200, { ok: true, deleted });
+        return;
+      }
 
       const project = options.projects.current();
       if (!project) throw new ProtocolError("TASK_LOCKED", "请先在项目工作台选择或新建项目");
@@ -209,6 +215,14 @@ export function createBridgeServer(options: BridgeServerOptions): Server {
       }
       if (request.method === "GET" && url.pathname === "/api/v1/canvas/assets") {
         send(response, 200, { ok: true, assets: project.canvasAssets.list() }); return;
+      }
+      if (request.method === "GET" && url.pathname === "/api/v1/canvas/delivery-target") {
+        send(response, 200, { ok: true, target: await project.delivery.readTarget() }); return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/v1/canvas/delivery-target") {
+        const body = await readJson(request);
+        if (!isRecord(body)) throw new ProtocolError("INVALID_INPUT", "正式交接目录请求必须是 JSON 对象");
+        send(response, 200, { ok: true, target: await project.delivery.saveTarget(body.aiDirectory) }); return;
       }
       if (request.method === "GET" && url.pathname === "/api/v1/canvas/project") {
         send(response, 200, { ok: true, project: project.canvasProject.read() }); return;
@@ -252,6 +266,18 @@ export function createBridgeServer(options: BridgeServerOptions): Server {
       if (request.method === "GET" && canvasAssetId) {
         sendCanvasAsset(response, await project.canvasAssets.readOriginal(decodeURIComponent(canvasAssetId))); return;
       }
+      const adoptCanvasAssetId = url.pathname.match(/^\/api\/v1\/canvas\/assets\/([^/]+)\/adopt$/)?.[1];
+      if (request.method === "POST" && adoptCanvasAssetId) {
+        const body = await readJson(request);
+        if (!isRecord(body)) throw new ProtocolError("INVALID_INPUT", "正式归档请求必须是 JSON 对象");
+        const adoption = await project.delivery.adopt(decodeURIComponent(adoptCanvasAssetId), {
+          viewpointName: body.viewpointName,
+          stage: body.stage,
+          taskId: body.taskId,
+          versionId: body.versionId
+        });
+        send(response, adoption.deduplicated ? 200 : 201, { ok: true, adoption }); return;
+      }
       const renditionMatch = url.pathname.match(/^\/api\/v1\/canvas\/assets\/([^/]+)\/(display|thumbnail)$/);
       if (request.method === "GET" && renditionMatch) {
         sendCanvasAsset(
@@ -292,7 +318,7 @@ export function createBridgeServer(options: BridgeServerOptions): Server {
         return;
       }
 
-      const match = url.pathname.match(/^\/api\/v1\/tasks\/([^/]+)(?:\/(claim|status|handoff|results|complete)|\/attachments\/([^/]+))?$/);
+      const match = url.pathname.match(/^\/api\/v1\/tasks\/([^/]+)(?:\/(claim|status|handoff|results|text-result|complete)|\/attachments\/([^/]+))?$/);
       if (!match) throw new ProtocolError("TASK_NOT_FOUND", "接口不存在");
       const id = decodeURIComponent(match[1] ?? ""); const action = match[2]; const attachmentId = match[3];
       const task = project.store.get(id);
@@ -307,6 +333,12 @@ export function createBridgeServer(options: BridgeServerOptions): Server {
         const body = await readJson(request, 60 * 1_048_576);
         if (!isRecord(body)) throw new ProtocolError("INVALID_INPUT", "结果请求体必须是 JSON 对象");
         const stored = await project.results.saveDataUrl(id, body.dataUrl, "visible-page");
+        send(response, stored.deduplicated ? 200 : 201, { ok: true, ...stored }); return;
+      }
+      if (action === "text-result") {
+        const body = await readJson(request, 256 * 1_024);
+        if (!isRecord(body)) throw new ProtocolError("INVALID_INPUT", "文字结果请求体必须是 JSON 对象");
+        const stored = await project.results.saveText(id, body.text, "visible-page");
         send(response, stored.deduplicated ? 200 : 201, { ok: true, ...stored }); return;
       }
 

@@ -70,6 +70,30 @@ export interface PromptLibraryItem {
   updatedAt: string;
 }
 
+export interface DeliveryTarget {
+  schemaVersion: "1.0";
+  aiDirectory: string;
+  finalDirectory: string;
+  configuredAt: string;
+  updatedAt: string;
+}
+
+export interface AdoptionRecord {
+  at: string;
+  assetId: string;
+  versionId: string | null;
+  taskId: string | null;
+  viewpointName: string;
+  stage: "stage-3" | "stage-4" | "final";
+  usage: "ai-version" | "ps-local-material";
+  destinationPath: string;
+  filename: string;
+  promptDestinationPath: string | null;
+  targetAiDirectory: string;
+  logRelativePath: string;
+  deduplicated: boolean;
+}
+
 let sessionToken: string | null = null;
 
 async function apiError(response: Response): Promise<Error> {
@@ -174,6 +198,51 @@ export async function updateActiveProjectRequirements(
   return body.requirements;
 }
 
+export async function readDeliveryTarget(): Promise<DeliveryTarget | null> {
+  const response = await authenticatedFetch("/api/v1/canvas/delivery-target");
+  if (!response.ok) throw await apiError(response);
+  const body = await response.json() as { target?: DeliveryTarget | null };
+  return body.target ?? null;
+}
+
+export async function saveDeliveryTarget(aiDirectory: string): Promise<DeliveryTarget> {
+  const response = await authenticatedFetch("/api/v1/canvas/delivery-target", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ aiDirectory })
+  });
+  if (!response.ok) throw await apiError(response);
+  const body = await response.json() as { target?: DeliveryTarget };
+  if (!body.target) throw new Error("本地服务未返回正式交接目录");
+  return body.target;
+}
+
+export async function adoptCanvasAsset(input: {
+  assetId: string;
+  viewpointName: string;
+  stage: "stage-3" | "stage-4" | "final";
+  taskId?: string | null;
+  versionId?: string | null;
+}): Promise<AdoptionRecord> {
+  const response = await authenticatedFetch(
+    `/api/v1/canvas/assets/${encodeURIComponent(input.assetId)}/adopt`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        viewpointName: input.viewpointName,
+        stage: input.stage,
+        taskId: input.taskId,
+        versionId: input.versionId
+      })
+    }
+  );
+  if (!response.ok) throw await apiError(response);
+  const body = await response.json() as { adoption?: AdoptionRecord };
+  if (!body.adoption) throw new Error("本地服务未返回正式归档结果");
+  return body.adoption;
+}
+
 export async function activateWorkbenchProject(projectId: string): Promise<WorkbenchProject> {
   const response = await authenticatedFetch(
     `/api/v1/workbench/projects/${encodeURIComponent(projectId)}/activate`,
@@ -183,6 +252,23 @@ export async function activateWorkbenchProject(projectId: string): Promise<Workb
   const body = await response.json() as { project?: WorkbenchProject };
   if (!body.project) throw new Error("本地服务未返回已选择项目");
   return body.project;
+}
+
+export async function deleteWorkbenchProject(projectId: string): Promise<{
+  id: string;
+  name: string;
+  trashRelativeLocation: string;
+}> {
+  const response = await authenticatedFetch(
+    `/api/v1/workbench/projects/${encodeURIComponent(projectId)}/delete`,
+    { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }
+  );
+  if (!response.ok) throw await apiError(response);
+  const body = await response.json() as {
+    deleted?: { id: string; name: string; trashRelativeLocation: string };
+  };
+  if (!body.deleted) throw new Error("本地服务未返回项目删除结果");
+  return body.deleted;
 }
 
 export async function listPromptLibrary(): Promise<PromptLibraryItem[]> {
@@ -262,12 +348,20 @@ export async function saveGeneratedAsset(
 export async function downloadOriginalAsset(assetId: string, originalName: string): Promise<void> {
   const response = await authenticatedFetch(`/api/v1/canvas/assets/${encodeURIComponent(assetId)}/original`);
   if (!response.ok) throw await apiError(response);
-  const url = URL.createObjectURL(await response.blob());
+  const blob = await response.blob();
+  if (!blob.size) throw new Error("原图文件为空，无法下载");
+  const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
   anchor.download = originalName;
-  anchor.click();
-  window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+  anchor.style.display = "none";
+  document.body.append(anchor);
+  try {
+    anchor.click();
+  } finally {
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  }
 }
 
 export async function createGenerationTask(input: CreateTaskInput): Promise<GenerationTask> {

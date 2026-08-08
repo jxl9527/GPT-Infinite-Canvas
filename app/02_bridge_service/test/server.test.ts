@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { AddressInfo } from "node:net";
@@ -25,7 +25,12 @@ test("v1 HTTP 完成附件读取、结果落盘去重、完成校验和脱敏诊
     projects,
     token,
     canvasOrigins: ["http://127.0.0.1:9999"],
-    allowedOrigins: ["http://127.0.0.1:9999", "https://chatgpt.com", "https://chat.openai.com"]
+    allowedOrigins: [
+      "http://127.0.0.1:9999",
+      "https://chatgpt.com",
+      "https://chat.openai.com",
+      "https://labs.google"
+    ]
   });
   await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
   const address = server.address() as AddressInfo; const base = `http://127.0.0.1:${address.port}`;
@@ -184,6 +189,12 @@ test("v1 HTTP 完成附件读取、结果落盘去重、完成校验和脱敏诊
     assert.equal(attachment.status, 200); assert.equal(attachment.headers.get("content-type"), "image/png");
     assert.equal(attachment.headers.get("access-control-allow-origin"), "https://chatgpt.com");
     assert.deepEqual(Buffer.from(await attachment.arrayBuffer()), pixel);
+    const flowPreflight = await fetch(`${base}/api/v1/tasks/${created.id}/attachments/${created.attachments[0]?.id}`, {
+      method: "OPTIONS",
+      headers: { origin: "https://labs.google" }
+    });
+    assert.equal(flowPreflight.status, 204);
+    assert.equal(flowPreflight.headers.get("access-control-allow-origin"), "https://labs.google");
 
     assert.equal((await post(`/api/v1/tasks/${created.id}/claim`, {})).response.status, 200);
     for (const status of ["uploading", "ready-to-submit", "submitted", "generating", "collecting"]) {
@@ -223,6 +234,28 @@ test("v1 HTTP 完成附件读取、结果落盘去重、完成校验和脱敏诊
     assert.equal(((completed.json.task ?? {}) as { status: string }).status, "completed");
     const delayedResult = await post(`/api/v1/tasks/${created.id}/results`, { dataUrl: generatedDataUrl });
     assert.equal(delayedResult.response.status, 409);
+
+    const textTaskCall = await post("/api/v1/tasks", {
+      taskType: "edit",
+      responseMode: "text",
+      target: { chatMode: "new" },
+      prompt: "阶段二：只审查锁定视角中的SU可见细节，不生成图片",
+      attachments: []
+    });
+    assert.equal(textTaskCall.response.status, 201);
+    const textTask = textTaskCall.json.task as { id: string; responseMode: string };
+    assert.equal(textTask.responseMode, "text");
+    await post(`/api/v1/tasks/${textTask.id}/claim`, {});
+    for (const status of ["ready-to-submit", "submitted", "generating", "collecting"]) {
+      assert.equal((await post(`/api/v1/tasks/${textTask.id}/status`, { status, by: "test" })).response.status, 200);
+    }
+    const textStored = await post(`/api/v1/tasks/${textTask.id}/text-result`, {
+      text: "建议只补充主视角可见的窗框厚度和玻璃内凹。"
+    });
+    assert.equal(textStored.response.status, 201);
+    const textCompleted = await post(`/api/v1/tasks/${textTask.id}/complete`, { by: "test" });
+    assert.equal(textCompleted.response.status, 200);
+    assert.match(String((textCompleted.json.task as { textResult?: { text?: string } }).textResult?.text), /窗框厚度/);
 
     const exported = await post("/api/v1/diagnostics/export", {}); assert.equal(exported.response.status, 201);
     const diagnostic = exported.json.diagnostic as { relativePath: string; sha256: string };
@@ -302,6 +335,11 @@ test("v1 HTTP 完成附件读取、结果落盘去重、完成校验和脱敏诊
       await readFile(join(root, ".runtime", "projects", blankProject.id, "project-meta.json"), "utf8")
     ) as { requirements?: unknown };
     assert.equal(blankMetadata.requirements, undefined);
+    const deletedBlankCall = await post(`/api/v1/workbench/projects/${blankProject.id}/delete`, {});
+    assert.equal(deletedBlankCall.response.status, 200);
+    assert.equal(await stat(join(root, ".runtime", "projects", blankProject.id)).catch(() => null), null);
+    assert.ok((await readdir(join(root, ".runtime", "trash", "projects"))).some((name) => name.startsWith(`${blankProject.id}.deleted-`)));
+    assert.equal((await post("/api/v1/workbench/projects/project_default/delete", {})).response.status, 422);
     const createdProjectCall = await post("/api/v1/workbench/projects", {
       name: "空白产业园方案",
       requirements: { sourceName: "项目需求.md", content: requirementsMarkdown }

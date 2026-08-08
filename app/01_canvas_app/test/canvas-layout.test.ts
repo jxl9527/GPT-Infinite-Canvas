@@ -3,12 +3,14 @@ import test from "node:test";
 import {
   applyOutputRatio,
   arrangeHorizontally,
+  arrangeVertically,
   buildCanvasRelation,
   coverCrop,
   coverCropForRenderedImage,
   fitImportedImage,
   normalizeImageFrames,
   placeChildToRight,
+  placeImageContextToolbar,
   removeImageNode,
   type ImageNodeState
 } from "../src/canvas-layout.js";
@@ -127,6 +129,52 @@ test("生成结果固定放到父节点右侧并记录父版本", () => {
   assert.equal(child.y, 120);
   assert.equal(child.parentVersionId, "version_test");
   assert.equal(child.taskId, "task_demo");
+});
+
+test("纵向排布使用每张图片实际高度推进且不会重叠", () => {
+  const first = { ...baseNode, id: "node_first" as const, width: 640, height: 320 };
+  const second = { ...baseNode, id: "node_second" as const, width: 480, height: 440 };
+  const third = { ...baseNode, id: "node_third" as const, width: 600, height: 300 };
+  const arranged = arrangeVertically([first, second, third], { x: 180, y: 90 }, 96);
+  assert.deepEqual(arranged.map((node) => ({ x: node.x, y: node.y })), [
+    { x: 180, y: 90 },
+    { x: 180, y: 506 },
+    { x: 180, y: 1042 }
+  ]);
+  assert.ok(arranged[0]!.y + arranged[0]!.height < arranged[1]!.y);
+  assert.ok(arranged[1]!.y + arranged[1]!.height < arranged[2]!.y);
+});
+
+test("图片浮动工具栏优先放在图片上方并限制在画布范围内", () => {
+  const placement = placeImageContextToolbar(
+    { x: 200, y: 180, width: 640, height: 360 },
+    { x: 40, y: 30, scale: 0.75 },
+    { width: 960, height: 720 }
+  );
+  assert.deepEqual(placement, {
+    left: 200,
+    top: 101,
+    width: 460,
+    placement: "above"
+  });
+});
+
+test("图片贴近画布顶部时工具栏移到下方，图片不可见时不显示", () => {
+  const below = placeImageContextToolbar(
+    { x: 40, y: 10, width: 320, height: 180 },
+    { x: 0, y: 0, scale: 1 },
+    { width: 640, height: 480 }
+  );
+  assert.equal(below?.placement, "below");
+  assert.equal(below?.top, 200);
+  assert.equal(
+    placeImageContextToolbar(
+      { x: 900, y: 20, width: 320, height: 180 },
+      { x: 0, y: 0, scale: 1 },
+      { width: 640, height: 480 }
+    ),
+    null
+  );
 });
 
 test("父子图片上下排布时连线从下边指向上边", () => {

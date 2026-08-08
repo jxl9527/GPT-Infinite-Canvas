@@ -1,11 +1,108 @@
 import type {
   CanvasImageAsset,
   GenerationStatus,
-  GenerationTask
+  GenerationTask,
+  ImageRole,
+  ResponseMode
 } from "@gpt-canvas/shared";
 import type { AnnotationState } from "./annotation-model.js";
 import type { ImageNodeState } from "./canvas-layout.js";
 import type { Viewport } from "./canvas-math.js";
+import type { CanvasTextCard } from "./text-card.js";
+
+export const WORKFLOW_STAGES = ["stage-1", "stage-2", "stage-3", "stage-4", "final"] as const;
+export type WorkflowStage = (typeof WORKFLOW_STAGES)[number];
+
+export const VIEWPOINT_STATUSES = ["not-started", "in-progress", "locked", "rework", "blocked"] as const;
+export type ViewpointStatus = (typeof VIEWPOINT_STATUSES)[number];
+
+export const HANDOFF_TARGETS = ["su", "d5", "gpt", "codex", "photoshop", "review"] as const;
+export type HandoffTarget = (typeof HANDOFF_TARGETS)[number];
+
+export interface ViewpointStatusCard {
+  id: `viewpoint_${string}`;
+  name: string;
+  purpose: string;
+  stage: WorkflowStage;
+  status: ViewpointStatus;
+  statusMode?: "auto" | "manual";
+  d5Batch: string;
+  sourceVersionId: `version_${string}` | null;
+  selectedVersionId: `version_${string}` | null;
+  conclusion: string;
+  nextAction: string;
+  updatedAt: string;
+}
+
+export interface StandardHandoffRecord {
+  id: `handoff_${string}`;
+  viewpointId: `viewpoint_${string}`;
+  viewpointName: string;
+  stage: WorkflowStage;
+  status: ViewpointStatus;
+  target: HandoffTarget;
+  d5Batch: string;
+  sourceVersionId: `version_${string}` | null;
+  selectedVersionId: `version_${string}` | null;
+  taskId: `task_${string}` | null;
+  conclusion: string;
+  nextAction: string;
+  createdAt: string;
+}
+
+export const BATCH_RUN_STATUSES = ["ready", "running", "paused", "completed"] as const;
+export type BatchRunStatus = (typeof BATCH_RUN_STATUSES)[number];
+
+export const BATCH_ITEM_STATUSES = ["queued", "running", "completed", "failed"] as const;
+export type BatchItemStatus = (typeof BATCH_ITEM_STATUSES)[number];
+
+export interface CanvasBatchItem {
+  id: `batch_item_${string}`;
+  sourceVersionId: `version_${string}`;
+  sourceName: string;
+  attachmentVersionIds?: `version_${string}`[];
+  attachmentRoles?: ImageRole[];
+  status: BatchItemStatus;
+  taskId: `task_${string}` | null;
+  resultVersionIds: `version_${string}`[];
+  error: string;
+}
+
+export interface CanvasBatchRun {
+  id: `batch_${string}`;
+  status: BatchRunStatus;
+  prompt: string;
+  promptMode?: "reference-edit" | "stage-only";
+  workflowStage?: WorkflowStage | null;
+  responseMode?: ResponseMode;
+  workflowAction?: "analyze" | "prompt" | "generate";
+  rulesetVersion?: string;
+  styleReferenceVersionId: `version_${string}` | null;
+  targetChatUrl?: string | null;
+  items: CanvasBatchItem[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CanvasWorkflowState {
+  activeViewpointId: `viewpoint_${string}` | null;
+  viewpoints: ViewpointStatusCard[];
+  handoffs: StandardHandoffRecord[];
+  batchRun: CanvasBatchRun | null;
+  customGptUrl: string;
+  customGptEnabled: boolean;
+  textCards: CanvasTextCard[];
+}
+
+export const EMPTY_CANVAS_WORKFLOW: CanvasWorkflowState = {
+  activeViewpointId: null,
+  viewpoints: [],
+  handoffs: [],
+  batchRun: null,
+  customGptUrl: "",
+  customGptEnabled: false,
+  textCards: []
+};
 
 export interface CanvasProjectNode {
   id: string;
@@ -53,6 +150,7 @@ export interface CanvasProjectDocument {
   assets: CanvasImageAsset[];
   versions: CanvasProjectVersion[];
   taskLinks: CanvasProjectTaskLink[];
+  workflow?: CanvasWorkflowState;
 }
 
 export interface ProjectBuildInput {
@@ -66,6 +164,7 @@ export interface ProjectBuildInput {
   assets: CanvasImageAsset[];
   generationTask: GenerationTask | null;
   taskParentVersionId: `version_${string}` | null;
+  workflow: CanvasWorkflowState;
 }
 
 function annotationSize(annotation: AnnotationState): { width: number; height: number } {
@@ -165,7 +264,8 @@ export function buildCanvasProjectDocument(input: ProjectBuildInput): CanvasProj
     canvas: { viewport: input.viewport, nodes: [...imageNodes, ...annotationNodes] },
     assets,
     versions,
-    taskLinks: [...taskLinksById.values()]
+    taskLinks: [...taskLinksById.values()],
+    workflow: structuredClone(input.workflow)
   };
 }
 
@@ -174,6 +274,7 @@ export interface RestoredProjectStructure {
   imageNodes: Array<Omit<ImageNodeState, "src">>;
   annotations: AnnotationState[];
   taskParentVersionId: `version_${string}` | null;
+  workflow: CanvasWorkflowState;
 }
 
 export function restoreCanvasProjectStructure(project: CanvasProjectDocument): RestoredProjectStructure {
@@ -218,6 +319,17 @@ export function restoreCanvasProjectStructure(project: CanvasProjectDocument): R
     viewport: project.canvas.viewport,
     imageNodes,
     annotations,
-    taskParentVersionId: project.taskLinks.at(-1)?.parentVersionId ?? null
+    taskParentVersionId: project.taskLinks.at(-1)?.parentVersionId ?? null,
+    workflow: project.workflow
+      ? {
+        ...structuredClone(EMPTY_CANVAS_WORKFLOW),
+        ...structuredClone(project.workflow),
+        customGptEnabled: project.workflow.customGptEnabled === true,
+        textCards: Array.isArray(project.workflow.textCards)
+          ? structuredClone(project.workflow.textCards)
+          : [],
+        batchRun: project.workflow.batchRun ? structuredClone(project.workflow.batchRun) : null
+      }
+      : structuredClone(EMPTY_CANVAS_WORKFLOW)
   };
 }

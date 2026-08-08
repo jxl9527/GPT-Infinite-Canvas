@@ -3,6 +3,7 @@
 **/dist/
 **/.build/
 **/.test-dist/
+**/.playwright-cli/
 **/coverage/
 **/*.tsbuildinfo
 

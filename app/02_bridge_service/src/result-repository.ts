@@ -1,7 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
-import { ProtocolError, type GenerationResult, type ImageMime } from "@gpt-canvas/shared";
+import {
+  ProtocolError,
+  type GenerationResult,
+  type GenerationTextResult,
+  type ImageMime
+} from "@gpt-canvas/shared";
 import type { TaskStore } from "./task-store.js";
 
 const MAX_RESULT_BYTES = 40 * 1024 * 1024;
@@ -77,6 +82,47 @@ export class ResultRepository {
     });
   }
 
+  async saveText(
+    taskId: string,
+    textValue: unknown,
+    source: GenerationTextResult["source"] = "visible-page"
+  ): Promise<{ result: GenerationTextResult; deduplicated: boolean }> {
+    return this.exclusive(taskId, async () => {
+      const task = this.store.get(taskId);
+      if (!task) throw new ProtocolError("TASK_NOT_FOUND", `任务不存在：${taskId}`);
+      if (task.status !== "collecting") throw new ProtocolError("RESULT_STATE_REJECTED", "只有 collecting 状态可以写入文字结果");
+      if (typeof textValue !== "string") throw new ProtocolError("INVALID_INPUT", "文字结果缺失");
+      const text = textValue.replace(/\r\n?/g, "\n").trim();
+      if (text.length < 2 || text.length > 50_000) throw new ProtocolError("INVALID_INPUT", "文字结果须为 2—50000 个字符");
+      const bytes = Buffer.from(`${text}\n`, "utf8");
+      const sha256 = createHash("sha256").update(bytes).digest("hex");
+      if (task.textResult?.sha256 === sha256) return { result: task.textResult, deduplicated: true };
+
+      const resultRoot = join(this.projectRoot, "runs", taskId, "results"); await mkdir(resultRoot, { recursive: true });
+      const filename = `assistant-response_${Date.now()}_${randomUUID().slice(0, 8)}.md`;
+      const destination = join(resultRoot, filename); const temporary = `${destination}.${randomUUID()}.tmp`;
+      await writeFile(temporary, bytes, { flag: "wx" }); await rename(temporary, destination);
+      const result: GenerationTextResult = {
+        id: randomUUID(),
+        createdAt: new Date().toISOString(),
+        text,
+        bytes: bytes.byteLength,
+        sha256,
+        relativePath: `runs/${taskId}/results/${filename}`,
+        source
+      };
+      try {
+        const stored = await this.store.addTextResult(taskId, result);
+        if (stored.deduplicated) await this.quarantine(taskId, destination, filename, "duplicate");
+        await this.writeIndex(taskId);
+        return stored;
+      } catch (error) {
+        await this.quarantine(taskId, destination, filename, "rejected");
+        throw error;
+      }
+    });
+  }
+
   async read(taskId: string, resultId: string): Promise<{ result: GenerationResult; bytes: Buffer }> {
     const task = this.store.get(taskId);
     if (!task) throw new ProtocolError("TASK_NOT_FOUND", `任务不存在：${taskId}`);
@@ -104,7 +150,13 @@ export class ResultRepository {
     if (!task) throw new ProtocolError("TASK_NOT_FOUND", `任务不存在：${taskId}`);
     const runRoot = join(this.projectRoot, "runs", taskId); await mkdir(runRoot, { recursive: true });
     const destination = join(runRoot, "result-index.json"); const temporary = `${destination}.${randomUUID()}.tmp`;
-    const payload = { schemaVersion: task.schemaVersion, taskId, updatedAt: new Date().toISOString(), results: task.results };
+    const payload = {
+      schemaVersion: task.schemaVersion,
+      taskId,
+      updatedAt: new Date().toISOString(),
+      results: task.results,
+      ...(task.textResult ? { textResult: task.textResult } : {})
+    };
     await writeFile(temporary, `${JSON.stringify(payload, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
     await rename(temporary, destination);
   }

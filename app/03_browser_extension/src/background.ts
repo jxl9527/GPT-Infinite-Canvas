@@ -1,5 +1,14 @@
-import { isTerminalStatus, type GenerationTask } from "./protocol.js";
-import { isAutoBindableTaskPage, isBindableTaskPage, isCanvasTriggerUrl, isChatGptUrl, isTrustedTaskMessage, shouldFocusChatForHandoff, statusForAdapterEvent } from "./background-guards.js";
+import { generationProviderOf, isTerminalStatus, type GenerationTask } from "./protocol.js";
+import {
+  isAutoBindableTaskPage,
+  isBindableTaskPage,
+  isCanvasTriggerUrl,
+  isSupportedGenerationUrl,
+  isTaskGenerationUrl,
+  isTrustedTaskMessage,
+  shouldFocusChatForHandoff,
+  statusForAdapterEvent
+} from "./background-guards.js";
 
 interface Settings {
   apiRoot: string;
@@ -87,20 +96,110 @@ async function requirePageTask(message: MessageRecord, sender: { tab?: { id?: nu
   return task;
 }
 
+async function insertTrustedText(tabId: number, text: string): Promise<void> {
+  const target = { tabId };
+  let attached = false;
+  try {
+    await chrome.debugger.attach(target, "1.3");
+    attached = true;
+    await chrome.debugger.sendCommand(target, "Input.dispatchKeyEvent", {
+      type: "rawKeyDown",
+      key: "a",
+      code: "KeyA",
+      windowsVirtualKeyCode: 65,
+      nativeVirtualKeyCode: 65,
+      modifiers: 2
+    });
+    await chrome.debugger.sendCommand(target, "Input.dispatchKeyEvent", {
+      type: "keyUp",
+      key: "a",
+      code: "KeyA",
+      windowsVirtualKeyCode: 65,
+      nativeVirtualKeyCode: 65,
+      modifiers: 2
+    });
+    await chrome.debugger.sendCommand(target, "Input.dispatchKeyEvent", {
+      type: "rawKeyDown",
+      key: "Backspace",
+      code: "Backspace",
+      windowsVirtualKeyCode: 8,
+      nativeVirtualKeyCode: 8
+    });
+    await chrome.debugger.sendCommand(target, "Input.dispatchKeyEvent", {
+      type: "keyUp",
+      key: "Backspace",
+      code: "Backspace",
+      windowsVirtualKeyCode: 8,
+      nativeVirtualKeyCode: 8
+    });
+    await chrome.debugger.sendCommand(target, "Input.insertText", { text });
+  } catch (error) {
+    throw new Error(`无法向 Google Flow 发送可信文本输入：${error instanceof Error ? error.message : "Chrome 调试接口失败"}`);
+  } finally {
+    if (attached) {
+      try { await chrome.debugger.detach(target); } catch { /* tab closed or debugger already detached */ }
+    }
+  }
+}
+
+async function clickTrustedPoint(tabId: number, x: number, y: number): Promise<void> {
+  const target = { tabId };
+  let attached = false;
+  try {
+    await chrome.debugger.attach(target, "1.3");
+    attached = true;
+    await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      x,
+      y,
+      button: "left",
+      buttons: 1,
+      clickCount: 1
+    });
+    await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      x,
+      y,
+      button: "left",
+      buttons: 0,
+      clickCount: 1
+    });
+  } catch (error) {
+    throw new Error(`无法点击 Google Flow 创建按钮：${error instanceof Error ? error.message : "Chrome 调试接口失败"}`);
+  } finally {
+    if (attached) {
+      try { await chrome.debugger.detach(target); } catch { /* tab closed or debugger already detached */ }
+    }
+  }
+}
+
 async function bindTab(task: GenerationTask, tabId: number): Promise<string> {
   const chatBindingId = crypto.randomUUID();
   await chrome.storage.local.set({ taskId: task.id, chatTaskId: task.id, chatBindingId, chatTabId: tabId });
   return chatBindingId;
 }
 
+async function taskTargetUrl(task: GenerationTask): Promise<string> {
+  if (task.target.chatMode === "existing" && task.target.chatUrl) return task.target.chatUrl;
+  if (generationProviderOf(task.target) !== "google-flow") return "https://chatgpt.com/";
+  const localProjectId = task.target.localProject?.id;
+  if (!localProjectId) return "https://labs.google/fx/zh/tools/flow";
+  const key = `flow-project-binding:${localProjectId}`;
+  const stored = await chrome.storage.local.get(key) as Record<string, unknown>;
+  const binding = stored[key] as { url?: unknown } | undefined;
+  return typeof binding?.url === "string" && binding.url.startsWith("https://labs.google/")
+    ? binding.url
+    : "https://labs.google/fx/zh/tools/flow";
+}
+
 async function openTask(task: GenerationTask): Promise<{ task: GenerationTask; tabId: number; bindingId: string; reused: boolean }> {
-  const target = task.target.chatMode === "existing" && task.target.chatUrl ? task.target.chatUrl : "https://chatgpt.com/";
+  const target = await taskTargetUrl(task);
   const current = await settings();
   if (current.chatTaskId === task.id && typeof current.chatTabId === "number") {
     try {
       const tab = await chrome.tabs.get(current.chatTabId) as { id: number; url?: string };
       const bindingId = await bindTab(task, tab.id);
-      if (!isChatGptUrl(tab.url)) await chrome.tabs.update(tab.id, { url: target, active: false });
+      if (!isTaskGenerationUrl(task, tab.url)) await chrome.tabs.update(tab.id, { url: target, active: false });
       else {
         await notifyPage(tab.id, task);
       }
@@ -120,11 +219,12 @@ async function notifyPage(tabId: number, task: GenerationTask): Promise<void> {
 }
 
 chrome.tabs.onUpdated.addListener(async (tabId: number, change: { status?: string }, tab: { url?: string }) => {
-  if (change.status !== "complete" || !isChatGptUrl(tab.url)) return;
+  if (change.status !== "complete" || !isSupportedGenerationUrl(tab.url)) return;
   const current = await settings();
   if (!current.taskId || current.chatTabId !== tabId) return;
   try {
-    const task = await currentTask(); if (task && task.id === current.taskId) await notifyPage(tabId, task);
+    const task = await currentTask();
+    if (task && task.id === current.taskId && isTaskGenerationUrl(task, tab.url)) await notifyPage(tabId, task);
   } catch { /* service unavailable: leave page untouched */ }
 });
 
@@ -170,7 +270,7 @@ chrome.runtime.onMessage.addListener((raw: unknown, sender: { tab?: { id?: numbe
     }
     if (message.type === "adapter-bind-current") {
       const task = await currentTask();
-      if (!task || !isBindableTaskPage(task, sender.tab?.id, sender.tab?.url)) throw new Error("当前页面不是可绑定的 ChatGPT 任务页");
+      if (!task || !isBindableTaskPage(task, sender.tab?.id, sender.tab?.url)) throw new Error("当前页面不是与任务来源匹配的生成页");
       const current = await settings();
       const bindingId = await bindTab(task, sender.tab!.id!);
       sendResponse({ ok: true, task, apiRoot: current.apiRoot, token: current.token, bindingId }); return;
@@ -190,6 +290,45 @@ chrome.runtime.onMessage.addListener((raw: unknown, sender: { tab?: { id?: numbe
         sendResponse({ ok: true, task: null }); return;
       }
       sendResponse({ ok: true, task, apiRoot: current.apiRoot, token: current.token, bindingId: current.chatBindingId }); return;
+    }
+    if (message.type === "adapter-insert-flow-prompt") {
+      const task = await requirePageTask(message, sender);
+      if (
+        generationProviderOf(task.target) !== "google-flow"
+        || typeof sender.tab?.id !== "number"
+        || typeof message.text !== "string"
+        || message.text !== task.prompt
+      ) {
+        throw new Error("Google Flow 可信文本输入与当前绑定任务不一致");
+      }
+      await insertTrustedText(sender.tab.id, message.text);
+      sendResponse({ ok: true }); return;
+    }
+    if (message.type === "adapter-click-flow-create") {
+      const task = await requirePageTask(message, sender);
+      const x = typeof message.x === "number" ? message.x : Number.NaN;
+      const y = typeof message.y === "number" ? message.y : Number.NaN;
+      if (
+        generationProviderOf(task.target) !== "google-flow"
+        || typeof sender.tab?.id !== "number"
+        || !task.submittedAt
+        || !Number.isFinite(x)
+        || !Number.isFinite(y)
+        || x < 0
+        || y < 0
+        || x > 20_000
+        || y > 20_000
+      ) {
+        throw new Error("Google Flow 可信创建点击与已锁定任务不一致");
+      }
+      await clickTrustedPoint(sender.tab.id, x, y);
+      sendResponse({ ok: true }); return;
+    }
+    if (message.type === "adapter-focus-current") {
+      await requirePageTask(message, sender);
+      if (typeof sender.tab?.id !== "number") throw new Error("当前生成标签页无效");
+      await chrome.tabs.update(sender.tab.id, { active: true });
+      sendResponse({ ok: true }); return;
     }
     if (message.type === "adapter-event") {
       const task = await requirePageTask(message, sender); const event = typeof message.event === "string" ? message.event : "";

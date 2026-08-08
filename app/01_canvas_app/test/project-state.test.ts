@@ -61,7 +61,42 @@ test("项目保存与恢复保持节点、批注和版本引用", () => {
     }],
     assets: [asset],
     generationTask: null,
-    taskParentVersionId: null
+    taskParentVersionId: null,
+    workflow: {
+      activeViewpointId: "viewpoint_00000000-0000-0000-0000-000000000001",
+      batchRun: null,
+      customGptUrl: "https://chatgpt.com/g/g-architect-review",
+      customGptEnabled: false,
+      textCards: [{
+        id: "text_card_00000000-0000-0000-0000-000000000001",
+        kind: "prompt",
+        title: "1人视｜生成提示词",
+        text: "【最终生成提示词】\n保持建筑结构不变。",
+        x: 820,
+        y: 234,
+        width: 460,
+        height: 360,
+        sourceVersionId: node.versionId,
+        taskId: "task_00000000-0000-0000-0000-000000000001",
+        createdAt: "2026-07-23T01:00:00.000Z",
+        updatedAt: "2026-07-23T01:00:00.000Z"
+      }],
+      viewpoints: [{
+        id: "viewpoint_00000000-0000-0000-0000-000000000001",
+        name: "1人视",
+        purpose: "主入口投标主图",
+        stage: "stage-3",
+        status: "in-progress",
+        statusMode: "auto",
+        d5Batch: "D5_01",
+        sourceVersionId: node.versionId,
+        selectedVersionId: null,
+        conclusion: "构图已锁定",
+        nextAction: "继续D5材质深化",
+        updatedAt: "2026-07-23T01:00:00.000Z"
+      }],
+      handoffs: []
+    }
   });
   const restored = restoreCanvasProjectStructure(project);
   assert.deepEqual(restored.viewport, { x: 72, y: 54, scale: 0.74 });
@@ -69,6 +104,11 @@ test("项目保存与恢复保持节点、批注和版本引用", () => {
   assert.equal(restored.imageNodes[0]?.versionId, node.versionId);
   assert.equal(restored.annotations[0]?.type, "text");
   assert.equal(project.versions[0]?.assetId, asset.id);
+  assert.equal(restored.workflow.viewpoints[0]?.name, "1人视");
+  assert.equal(restored.workflow.viewpoints[0]?.sourceVersionId, node.versionId);
+  assert.equal(restored.workflow.customGptUrl, "https://chatgpt.com/g/g-architect-review");
+  assert.equal(restored.workflow.customGptEnabled, false);
+  assert.equal(restored.workflow.textCards[0]?.kind, "prompt");
   assert.equal(new Set(project.canvas.nodes.map((entry) => entry.id)).size, project.canvas.nodes.length);
   assert.match(project.canvas.nodes[1]?.id ?? "", /^node_annotation_/);
 });
@@ -84,6 +124,7 @@ test("未登记资产不得保存到项目", () => {
     annotations: [],
     assets: [],
     generationTask: null,
-    taskParentVersionId: null
+    taskParentVersionId: null,
+    workflow: { activeViewpointId: null, viewpoints: [], handoffs: [], batchRun: null, customGptUrl: "", customGptEnabled: false, textCards: [] }
   }), /节点资产未登记/);
 });

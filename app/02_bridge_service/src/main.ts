@@ -37,7 +37,8 @@ const server = createBridgeServer({
     "http://127.0.0.1:3230",
     "http://localhost:3230",
     "https://chatgpt.com",
-    "https://chat.openai.com"
+    "https://chat.openai.com",
+    "https://labs.google"
   ]
 });
 server.listen(port, host, async () => {
@@ -47,7 +48,7 @@ server.listen(port, host, async () => {
 
 try {
   await access(resolve(canvasDistRoot, "index.html"));
-  const canvasServer = createCanvasStaticServer(canvasDistRoot);
+  const canvasServer = createCanvasStaticServer(canvasDistRoot, `http://${host}:${port}`);
   canvasServer.listen(canvasPort, host, () => {
     process.stdout.write(`GPT Canvas P2 listening at http://${host}:${canvasPort}\n`);
   });

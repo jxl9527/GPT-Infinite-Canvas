@@ -88,14 +88,14 @@ export function buildGenerationTaskPreview(
   const prompt = normalizedInstruction
     ? mode === "reference-edit"
       ? [
-        `[P2-REFERENCE-EDIT] ${normalizedInstruction}`,
+        `[GPT-CANVAS][REFERENCE-EDIT] ${normalizedInstruction}`,
         "",
         hasAnnotations ? ANNOTATION_GUARD : STRUCTURE_GUARD,
         attachments.length === 2 ? STYLE_GUARD : SINGLE_IMAGE_GUARD,
-        "输出要求：保持原始画幅关系，生成一张可直接回收到当前画布的高质量建筑方案图。"
+        "输出要求：请直接生成一张可回收到当前画布的高质量建筑方案图，保持原始画幅关系；不要只返回文字建议。"
       ].join("\n")
       : [
-        `[P2-CONCEPT-GENERATION] ${normalizedInstruction}`,
+        `[GPT-CANVAS][CONCEPT-GENERATION] ${normalizedInstruction}`,
         "",
         ...(includesProjectContext
           ? [
@@ -108,7 +108,7 @@ export function buildGenerationTaskPreview(
           ? [hasAnnotations ? ANNOTATION_GUARD : CONCEPT_REFERENCE]
           : []),
         ...(attachments.length === 2 ? [STYLE_GUARD] : []),
-        "输出要求：生成一张适合建筑方案汇报、分析图或投标表达的高质量图像。"
+        "输出要求：请直接生成一张适合建筑方案汇报、分析图或投标表达的高质量图像；不要只返回文字建议。"
       ].join("\n")
     : "";
 

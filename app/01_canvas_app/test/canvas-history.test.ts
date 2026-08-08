@@ -28,6 +28,7 @@ function snapshot(name: string, x: number): CanvasHistorySnapshot {
       outputRatio: "free"
     }],
     annotations: [],
+    textCards: [],
     structureBaseId: null,
     styleReferenceId: null,
     taskInstruction: ""

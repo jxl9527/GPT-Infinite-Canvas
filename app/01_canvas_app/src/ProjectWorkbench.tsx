@@ -11,6 +11,7 @@ import {
   activateWorkbenchProject,
   connectCanvasSession,
   createWorkbenchProject,
+  deleteWorkbenchProject,
   getCurrentBridgeToken,
   listWorkbenchProjects,
   previewProjectRequirements,
@@ -59,11 +60,14 @@ export function ProjectWorkbench({ onOpen }: ProjectWorkbenchProps) {
   const [copyingToken, setCopyingToken] = useState(false);
   const [tokenCopied, setTokenCopied] = useState(false);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const requirementsInputRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError("");
+    setNotice("");
     try {
       await connectCanvasSession();
       const result = await listWorkbenchProjects();
@@ -87,6 +91,23 @@ export function ProjectWorkbench({ onOpen }: ProjectWorkbenchProps) {
       onOpen(await activateWorkbenchProject(project.id));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "项目打开失败");
+      setBusyProjectId(null);
+    }
+  };
+
+  const remove = async (project: WorkbenchProject) => {
+    if (busyProjectId || creating || project.id === "project_default") return;
+    setBusyProjectId(project.id);
+    setError("");
+    setNotice("");
+    try {
+      const deleted = await deleteWorkbenchProject(project.id);
+      setProjects((current) => current.filter((candidate) => candidate.id !== project.id));
+      setConfirmDeleteId(null);
+      setNotice(`“${deleted.name}”已移至本地回收目录，可从 ${deleted.trashRelativeLocation} 恢复。`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "项目删除失败");
+    } finally {
       setBusyProjectId(null);
     }
   };
@@ -293,6 +314,7 @@ export function ProjectWorkbench({ onOpen }: ProjectWorkbenchProps) {
         </form>
 
         {error && <p className="workbench-error" role="alert">{error}</p>}
+        {notice && <p className="workbench-notice" role="status">{notice}</p>}
 
         <div className="project-list" data-loading={loading}>
           {!loading && projects.length === 0 && (
@@ -319,13 +341,39 @@ export function ProjectWorkbench({ onOpen }: ProjectWorkbenchProps) {
                 <div><dt>版本</dt><dd>R{project.revision}</dd></div>
                 <div><dt>更新</dt><dd>{projectDate(project.updatedAt)}</dd></div>
               </dl>
-              <button
-                type="button"
-                onClick={() => void open(project)}
-                disabled={Boolean(busyProjectId) || creating}
-              >
-                {busyProjectId === project.id ? "正在打开…" : "进入项目"}
-              </button>
+              <div className="project-actions">
+                <button
+                  type="button"
+                  className="project-open"
+                  onClick={() => void open(project)}
+                  disabled={Boolean(busyProjectId) || creating}
+                >
+                  {busyProjectId === project.id && confirmDeleteId !== project.id ? "正在打开…" : "进入项目"}
+                </button>
+                {project.id !== "project_default" && (
+                  <button
+                    type="button"
+                    className="project-delete"
+                    onClick={() => setConfirmDeleteId((current) => current === project.id ? null : project.id)}
+                    disabled={Boolean(busyProjectId) || creating}
+                  >删除</button>
+                )}
+              </div>
+              {confirmDeleteId === project.id && (
+                <div className="project-delete-confirm" role="group" aria-label={`确认删除 ${project.name}`}>
+                  <span>
+                    <strong>移除“{project.name}”？</strong>
+                    <small>项目会移至本地回收目录，不会立即永久删除。</small>
+                  </span>
+                  <button type="button" onClick={() => setConfirmDeleteId(null)}>取消</button>
+                  <button
+                    type="button"
+                    className="confirm-delete"
+                    disabled={Boolean(busyProjectId)}
+                    onClick={() => void remove(project)}
+                  >{busyProjectId === project.id ? "正在移除…" : "确认移除"}</button>
+                </div>
+              )}
             </article>
           ))}
         </div>
