@@ -128,6 +128,7 @@ export function createBridgeServer(options: BridgeServerOptions): Server {
         send(response, 200, {
           ok: true,
           schemaVersion: "1.0",
+          releaseVersion: "0.4.0",
           activeProjectId: current?.id ?? null,
           activeTaskId: current?.store.getActive()?.id ?? null
         });

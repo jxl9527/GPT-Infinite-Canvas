@@ -43,7 +43,7 @@ const server = createBridgeServer({
 });
 server.listen(port, host, async () => {
   await writeFile(resolve(runtimeRoot, "service.pid"), `${process.pid}\n`, "utf8");
-  process.stdout.write(`GPT Canvas Bridge v1 listening at http://${host}:${port}\n`);
+  process.stdout.write(`GPT Canvas Bridge 0.4.0 listening at http://${host}:${port}\n`);
 });
 
 try {

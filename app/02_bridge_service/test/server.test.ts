@@ -40,8 +40,8 @@ test("v1 HTTP 完成附件读取、结果落盘去重、完成校验和脱敏诊
     return { response, json: await response.json() as Record<string, unknown> };
   };
   try {
-    const health = await fetch(`${base}/health`).then((response) => response.json()) as { ok: boolean; activeTaskId: string | null };
-    assert.equal(health.ok, true); assert.equal(health.activeTaskId, null);
+    const health = await fetch(`${base}/health`).then((response) => response.json()) as { ok: boolean; releaseVersion: string; activeTaskId: string | null };
+    assert.equal(health.ok, true); assert.equal(health.releaseVersion, "0.4.0"); assert.equal(health.activeTaskId, null);
 
     const rejectedCanvasSession = await fetch(`${base}/api/v1/canvas/session`, {
       headers: { origin: "https://chatgpt.com" }

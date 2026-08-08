@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { access } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 const bundleRoot = resolve(process.argv[2] ?? "");
@@ -10,6 +10,7 @@ const canvasPort = Number(process.env.GPT_CANVAS_SMOKE_UI_PORT ?? 3330);
 const runtimeRoot = join(bundleRoot, "runtime-smoke");
 const serviceEntry = join(bundleRoot, "02_bridge_service", "dist", "src", "main.js");
 const canvasDistRoot = join(bundleRoot, "01_canvas_app", "dist");
+const expectedReleaseVersion = JSON.parse(await readFile(join(bundleRoot, "package.json"), "utf8")).version;
 
 await access(serviceEntry);
 await access(join(canvasDistRoot, "index.html"));
@@ -62,6 +63,9 @@ async function waitForCanvas() {
 
 try {
   const health = await waitForHealth();
+  if (health.releaseVersion !== expectedReleaseVersion) {
+    throw new Error(`发布包版本与运行服务不一致：expected=${expectedReleaseVersion} actual=${health.releaseVersion ?? "missing"}`);
+  }
   const canvas = await waitForCanvas();
   await access(join(runtimeRoot, "bridge-token.txt"));
   process.stdout.write(`${JSON.stringify({
@@ -69,6 +73,7 @@ try {
     bridgePort,
     canvasPort,
     schemaVersion: health.schemaVersion,
+    releaseVersion: health.releaseVersion,
     canvasStatus: canvas.status,
     runtimeTokenCreated: true
   }, null, 2)}\n`);
