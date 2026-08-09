@@ -36,6 +36,17 @@ const adapter: GPTCanvasContent.GenerationPageAdapter = location.hostname === "l
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : "发生未知错误"; }
 function baselineKey(): string { return bridge ? `p1-baseline:${bridge.task.id}` : ""; }
 function responseMode(): "image" | "text" | "image-or-text" { return bridge?.task.responseMode ?? "image"; }
+function textResponseReady(text: string): boolean {
+  if (!bridge) return false;
+  const generating = adapter.isGenerating();
+  const completionSignal = adapter.isResponseComplete?.() ?? !generating;
+  return GPTCanvasContent.textResponseReady(
+    bridge.task.prompt,
+    text,
+    generating,
+    completionSignal
+  );
+}
 
 async function send(event: string, payload: Record<string, unknown> = {}): Promise<ExtensionResponse> {
   if (!bridge) throw new Error("任务尚未绑定到当前页面");
@@ -343,7 +354,10 @@ async function collectResults(): Promise<void> {
 async function collectTextResult(): Promise<void> {
   if (!bridge || !submitted) { setStatus("请先完成本轮单次提交。", "error"); return; }
   const text = adapter.collectAssistantText?.().trim() ?? "";
-  if (text.length < 2) { setStatus("未识别到本轮文字结论，请等待回复完成或转人工接管。", "error"); return; }
+  if (!textResponseReady(text)) {
+    setStatus("本轮文字回复仍在生成或缺少必需章节，请等待完整回复后再回收。", "error");
+    return;
+  }
   const collectButton = panel?.querySelector<HTMLButtonElement>("[data-action=collect]");
   if (collectButton?.disabled) { setStatus("本轮结果正在收集，请勿重复点击。", "error"); return; }
   if (collectButton) collectButton.disabled = true;
@@ -428,7 +442,7 @@ async function observeAndCollect(): Promise<void> {
         if (stablePolls >= 3) { await collectResults(); return; }
       } else {
         stablePolls = 0; previous = signature;
-        textOnlyStablePolls = !adapter.isGenerating() && assistantText.length >= 20
+        textOnlyStablePolls = textResponseReady(assistantText)
           ? assistantText === previousText ? textOnlyStablePolls + 1 : 1
           : 0;
         previousText = assistantText;
@@ -449,7 +463,14 @@ async function observeAndCollect(): Promise<void> {
       }
       await waitForResultSignal();
     }
-    if (bridge?.task.status !== "completed") await handoff("10 分钟内未能稳定识别本轮完成图片");
+    if (bridge?.task.status !== "completed") {
+      const mode = responseMode();
+      await handoff(mode === "text"
+        ? "10 分钟内未能确认本轮文字回复完成"
+        : mode === "image"
+          ? "10 分钟内未能稳定识别本轮完成图片"
+          : "10 分钟内未能稳定识别本轮完成结果");
+    }
   } catch (error) { await handoff(`自动观察失败：${errorMessage(error)}`); }
   finally { observing = false; }
 }

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { MAX_VIEWPOINT_CONCLUSION_LENGTH, ProtocolError } from "@gpt-canvas/shared";
+import { MAX_VIEWPOINT_CONCLUSION_LENGTH, MAX_VIEWPOINT_NAME_LENGTH, ProtocolError } from "@gpt-canvas/shared";
 
 type JsonObject = Record<string, unknown>;
 
@@ -147,7 +147,7 @@ function validateProject(value: unknown): JsonObject {
         throw new ProtocolError("INVALID_INPUT", "视角状态卡无效");
       }
       viewpointIds.add(viewpoint.id);
-      boundedString(viewpoint.name, "viewpoint.name", 40);
+      boundedString(viewpoint.name, "viewpoint.name", MAX_VIEWPOINT_NAME_LENGTH);
       boundedString(viewpoint.purpose, "viewpoint.purpose", 100);
       boundedString(viewpoint.d5Batch, "viewpoint.d5Batch", 20);
       boundedString(viewpoint.conclusion, "viewpoint.conclusion", MAX_VIEWPOINT_CONCLUSION_LENGTH);

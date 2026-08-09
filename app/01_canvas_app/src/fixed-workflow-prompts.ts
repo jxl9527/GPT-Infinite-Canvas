@@ -77,10 +77,16 @@ export function dedicatedGptStagePrompt(stage: WorkflowStage, snapshot?: Workflo
 
 export function wrapPromptForAction(action: WorkflowAction, prompt: string): string {
   if (action === "generate") return prompt;
+  const textOnlyPrompt = prompt
+    .split(/\r?\n/)
+    .filter((line) => !line.trim().startsWith("输出要求：请直接生成一张"))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
   const instruction = action === "prompt"
     ? "本轮只生成或优化提示词，不生成图片。请保留用户意图，补全结构保护、空间位置、光影逻辑和禁止项，并把可直接使用的成稿放在【最终生成提示词】下。"
     : "本轮只分析图片并返回文字，不生成图片。结论应简洁、可执行，并明确下一步。";
-  return `${instruction}\n\n${prompt}`.trim();
+  return `${instruction}\n\n${textOnlyPrompt}`.trim();
 }
 
 export const FIXED_WORKFLOW_PROMPTS: readonly FixedWorkflowPrompt[] = [

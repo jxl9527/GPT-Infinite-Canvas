@@ -1,4 +1,6 @@
-export const MINIMUM_AUTOMATION_EXTENSION_VERSION = "1.5.20";
+import { nextChildBoundsToRight } from "./canvas-layout.js";
+
+export const MINIMUM_AUTOMATION_EXTENSION_VERSION = "1.5.21";
 
 export function automationExtensionVersion(explicitVersion: string | null, message: string | null): string | null {
   const candidate = explicitVersion?.trim() || message?.match(/\b(\d+\.\d+\.\d+)\b/)?.[1] || "";
@@ -47,12 +49,9 @@ export function shouldShowImageGenerationPlaceholder(
 
 export function generationPlaceholderBounds(
   source: { x: number; y: number; width: number; height: number },
-  gap = 96
+  occupied: readonly { x: number; y: number; width: number; height: number }[] = [],
+  gap = 96,
+  verticalGap = 48
 ): { x: number; y: number; width: number; height: number } {
-  return {
-    x: Math.round(source.x + source.width + gap),
-    y: Math.round(source.y),
-    width: Math.max(1, Math.round(source.width)),
-    height: Math.max(1, Math.round(source.height))
-  };
+  return nextChildBoundsToRight(source, source, occupied, gap, verticalGap);
 }

@@ -76,3 +76,31 @@ test("历史图片基线只保存哈希并过滤重复源地址", async () => {
   assert.equal(api.containsSandboxImagePath("已生成：`/mnt/data/result.webp`"), true);
   assert.equal(api.containsSandboxImagePath("https://example.com/result.png"), false);
 });
+
+test("文字任务等待回复完成且必需章节齐全后才允许回收", async () => {
+  const source = await readFile(resolve(root, "dist", "content", "page-state.js"), "utf8");
+  const context: Record<string, unknown> = {
+    crypto: webcrypto,
+    TextEncoder,
+    TextDecoder,
+    AbortController,
+    Uint8Array,
+    URL,
+    location: { href: "https://chatgpt.com/" },
+    setTimeout,
+    clearTimeout
+  };
+  vm.createContext(context); vm.runInContext(source, context);
+  const api = context.GPTCanvasContent as {
+    textResponseReady(prompt: string, response: string, generating: boolean, completionSignal: boolean): boolean;
+  };
+  const prompt = "请输出【D5调整建议】【最终生成提示词】【必须保持与禁止改变】";
+  const historicalPartial = "ChatGPT 说：【D5调整建议】\n\n光影改为参考图的";
+  const complete = "【D5调整建议】\n调整光影。\n【最终生成提示词】\n保持结构。\n【必须保持与禁止改变】\n不得改建筑。";
+  const markdownHeadings = "### D5调整建议\n调整光影。\n### 最终生成提示词\n保持结构。\n### 必须保持与禁止改变\n不得改建筑。";
+  assert.equal(api.textResponseReady(prompt, historicalPartial, false, true), false);
+  assert.equal(api.textResponseReady(prompt, complete, true, true), false);
+  assert.equal(api.textResponseReady(prompt, complete, false, false), false);
+  assert.equal(api.textResponseReady(prompt, complete, false, true), true);
+  assert.equal(api.textResponseReady(prompt, markdownHeadings, false, true), true);
+});

@@ -42,6 +42,7 @@ export function placeImageContextToolbar(
     height?: number;
     gap?: number;
     padding?: number;
+    leftInset?: number;
   } = {}
 ): ImageContextToolbarPlacement | null {
   const minWidth = options.minWidth ?? 330;
@@ -49,6 +50,7 @@ export function placeImageContextToolbar(
   const toolbarHeight = options.height ?? 54;
   const gap = options.gap ?? 10;
   const padding = options.padding ?? 12;
+  const leftInset = Math.max(padding, options.leftInset ?? padding);
   const nodeLeft = viewport.x + node.x * viewport.scale;
   const nodeTop = viewport.y + node.y * viewport.scale;
   const nodeWidth = node.width * viewport.scale;
@@ -57,7 +59,7 @@ export function placeImageContextToolbar(
   const nodeBottom = nodeTop + nodeHeight;
 
   if (
-    canvas.width <= padding * 2
+    canvas.width <= leftInset + padding
     || canvas.height <= toolbarHeight + padding * 2
     || nodeRight <= 0
     || nodeBottom <= 0
@@ -67,13 +69,13 @@ export function placeImageContextToolbar(
     return null;
   }
 
-  const availableWidth = canvas.width - padding * 2;
+  const availableWidth = canvas.width - leftInset - padding;
   const width = Math.min(
     availableWidth,
     Math.max(Math.min(minWidth, availableWidth), Math.min(maxWidth, nodeWidth))
   );
   const preferredLeft = nodeLeft + (nodeWidth - width) / 2;
-  const left = Math.max(padding, Math.min(preferredLeft, canvas.width - width - padding));
+  const left = Math.max(leftInset, Math.min(preferredLeft, canvas.width - width - padding));
   const aboveTop = nodeTop - gap - toolbarHeight;
   if (aboveTop >= padding) {
     return { left, top: aboveTop, width, placement: "above" };
@@ -244,6 +246,44 @@ export function placeChildToRight(
     ...child,
     x: Math.round(parent.x + parent.width + gap),
     y: Math.round(parent.y),
+    parentVersionId: parent.versionId
+  };
+}
+
+export function nextChildBoundsToRight(
+  parent: Pick<ImageNodeState, "x" | "y" | "width" | "height">,
+  child: Pick<ImageNodeState, "width" | "height">,
+  occupied: readonly Pick<ImageNodeState, "x" | "y" | "width" | "height">[] = [],
+  horizontalGap = 96,
+  verticalGap = 48
+): { x: number; y: number; width: number; height: number } {
+  const x = Math.round(parent.x + parent.width + horizontalGap);
+  const width = Math.max(1, Math.round(child.width));
+  const height = Math.max(1, Math.round(child.height));
+  let y = Math.round(parent.y);
+  const horizontallyOverlapping = occupied
+    .filter((item) => item.x < x + width && item.x + item.width > x)
+    .sort((left, right) => left.y - right.y);
+
+  for (const item of horizontallyOverlapping) {
+    const overlapsVertically = y < item.y + item.height && y + height > item.y;
+    if (overlapsVertically) y = Math.round(item.y + item.height + verticalGap);
+  }
+  return { x, y, width, height };
+}
+
+export function placeChildToRightStacked(
+  parent: ImageNodeState,
+  child: ImageNodeState,
+  occupied: readonly Pick<ImageNodeState, "x" | "y" | "width" | "height">[] = [],
+  horizontalGap = 96,
+  verticalGap = 48
+): ImageNodeState {
+  const bounds = nextChildBoundsToRight(parent, child, occupied, horizontalGap, verticalGap);
+  return {
+    ...child,
+    x: bounds.x,
+    y: bounds.y,
     parentVersionId: parent.versionId
   };
 }

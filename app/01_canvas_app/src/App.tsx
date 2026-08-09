@@ -76,7 +76,7 @@ import {
   coverCropForRenderedImage,
   fitImportedImage,
   normalizeImageFrames,
-  placeChildToRight,
+  placeChildToRightStacked,
   placeImageContextToolbar,
   removeImageNode,
   type ImageNodeState,
@@ -123,6 +123,7 @@ import {
   type WorkflowStage
 } from "./project-state";
 import { workflowConclusionFromText } from "./workflow-text";
+import { viewpointNameFromFilename } from "./viewpoint-name";
 import {
   createCanvasHistory,
   moveCanvasHistory,
@@ -146,25 +147,54 @@ import {
 } from "./custom-gpt";
 import {
   normalizeSelectionRect,
-  selectNodesInRect,
-  shouldStartMarqueeOnBackground
+  selectMixedCanvasObjectsInRect,
+  shouldStartMarqueeOnBackground,
+  translateSelectedObjects
 } from "./marquee-selection";
+import {
+  buildCanvasNodeIndex,
+  selectedNodesInCanvasOrder
+} from "./canvas-node-index";
+import {
+  decodeCanvasObjectValue,
+  encodeCanvasObjectValue,
+  type CanvasObjectGroup
+} from "./canvas-object-navigation";
+import { CanvasObjectNavigator } from "./CanvasObjectNavigator";
 import {
   WORKBENCH_HEIGHT_STORAGE_KEY,
   WORKBENCH_WIDTH_STORAGE_KEY,
+  appendUnifiedTaskRequirement,
+  batchWorkbenchStatus,
   clampWorkbenchHeight,
   clampWorkbenchWidth,
+  combinePromptText,
+  deliveryWorkbenchStatus,
+  previewWorkbenchStatus,
+  promptWorkbenchStatus,
+  placeSelectionContextPanel,
   resizedWorkbenchHeight,
   resizedWorkbenchWidth,
+  selectionAfterTextCardHandoff,
+  selectionContextMode,
   storedWorkbenchHeight,
-  storedWorkbenchWidth
+  storedWorkbenchWidth,
+  type PromptApplyMode
 } from "./workbench-panel";
 import {
   alignedGlassFilename,
   aspectRatiosMatch,
+  buildPromptOptimizerInput,
   createCanvasTextCard,
   extractFinalPrompt,
+  inferTextCardWorkflowLabel,
+  nextWorkflowActionForTextCard,
+  normalizeReturnedText,
+  parseReturnedTextSections,
   resizedTextCardSize,
+  returnedTextCharacterCount,
+  textCardHandoffLabel,
+  textCardDisplayTitle,
   type CanvasTextCard
 } from "./text-card";
 
@@ -212,6 +242,17 @@ interface MarqueeState {
   y: number;
   width: number;
   height: number;
+}
+
+interface CanvasGroupMoveSnapshot {
+  anchorKind: "image" | "text-card";
+  anchorId: string;
+  anchorX: number;
+  anchorY: number;
+  imageIds: Set<string>;
+  textCardIds: Set<string>;
+  nodes: ImageNodeState[];
+  textCards: CanvasTextCard[];
 }
 
 interface LatestSaveState {
@@ -353,6 +394,9 @@ function CanvasImageNode({
   viewportScale,
   register,
   onSelect,
+  onMoveStart,
+  onMove,
+  onMoveEnd,
   onManipulationStart,
   onManipulationEnd,
   onChange
@@ -366,6 +410,9 @@ function CanvasImageNode({
   viewportScale: number;
   register: (instance: Konva.Group | null) => void;
   onSelect: () => void;
+  onMoveStart: () => void;
+  onMove: (x: number, y: number) => void;
+  onMoveEnd: () => void;
   onManipulationStart: () => void;
   onManipulationEnd: () => void;
   onChange: (next: ImageNodeState) => void;
@@ -393,9 +440,14 @@ function CanvasImageNode({
       draggable={selectable}
       onClick={selectable ? onSelect : undefined}
       onTap={selectable ? onSelect : undefined}
-      onDragStart={selectable ? onManipulationStart : undefined}
+      onDragStart={selectable ? () => {
+        onManipulationStart();
+        onMoveStart();
+      } : undefined}
+      onDragMove={(event) => onMove(event.target.x(), event.target.y())}
       onDragEnd={(event) => {
-        onChange({ ...node, x: Math.round(event.target.x()), y: Math.round(event.target.y()) });
+        onMove(event.target.x(), event.target.y());
+        onMoveEnd();
         onManipulationEnd();
       }}
     >
@@ -632,10 +684,15 @@ function CanvasTextCardNode({
   card,
   viewport,
   selected,
+  saveState,
   onSelect,
+  onMoveStart,
+  onMove,
+  onMoveEnd,
   onChange,
   onCommit,
   onUse,
+  onContinue,
   onCopy,
   onSave,
   onRemove
@@ -643,40 +700,85 @@ function CanvasTextCardNode({
   card: CanvasTextCard;
   viewport: Viewport;
   selected: boolean;
+  saveState: SaveState;
   onSelect: () => void;
+  onMoveStart: () => void;
+  onMove: (x: number, y: number) => void;
+  onMoveEnd: () => void;
   onChange: (patch: Partial<CanvasTextCard>) => void;
   onCommit: () => void;
   onUse: (text: string) => void;
-  onCopy: (text: string) => void;
-  onSave: (text: string) => void;
+  onContinue: (text: string) => void;
+  onCopy: (text: string) => Promise<boolean>;
+  onSave: (text: string) => Promise<boolean>;
   onRemove: () => void;
 }) {
+  const articleRef = useRef<HTMLElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const chosenText = (preferSelection: boolean) => {
-    const textarea = textareaRef.current;
-    if (preferSelection && textarea && textarea.selectionEnd > textarea.selectionStart) {
-      return card.text.slice(textarea.selectionStart, textarea.selectionEnd).trim();
-    }
-    return card.kind === "prompt" ? extractFinalPrompt(card.text) : card.text.trim();
+  const feedbackTimerRef = useRef<number | null>(null);
+  const normalizedText = useMemo(() => normalizeReturnedText(card.text), [card.text]);
+  const sections = useMemo(() => parseReturnedTextSections(card.text), [card.text]);
+  const [viewMode, setViewMode] = useState<"structured" | "raw">("structured");
+  const [activeSectionId, setActiveSectionId] = useState(() => sections[0]?.id ?? "");
+  const [selectedText, setSelectedText] = useState("");
+  const [actionPending, setActionPending] = useState<"copy" | "save" | null>(null);
+  const [actionFeedback, setActionFeedback] = useState("");
+  const activeSection = sections.find((section) => section.id === activeSectionId) ?? sections[0] ?? null;
+  const nextTaskText = card.kind === "prompt" ? extractFinalPrompt(normalizedText) : normalizedText;
+  const workflowLabel = card.workflowLabel ?? inferTextCardWorkflowLabel({ kind: card.kind, prompt: normalizedText });
+  const saveLabel = saveState === "saving" ? "正在自动保存"
+    : saveState === "error" ? "保存失败"
+      : saveState === "loading" ? "正在读取"
+        : "已自动保存";
+
+  useEffect(() => {
+    if (sections.some((section) => section.id === activeSectionId)) return;
+    setActiveSectionId(sections[0]?.id ?? "");
+  }, [activeSectionId, sections]);
+
+  useEffect(() => () => {
+    if (feedbackTimerRef.current !== null) window.clearTimeout(feedbackTimerRef.current);
+  }, []);
+
+  const announceFeedback = useCallback((message: string) => {
+    setActionFeedback(message);
+    if (feedbackTimerRef.current !== null) window.clearTimeout(feedbackTimerRef.current);
+    feedbackTimerRef.current = window.setTimeout(() => setActionFeedback(""), 2_600);
+  }, []);
+
+  const captureStructuredSelection = () => {
+    const selection = window.getSelection();
+    const anchor = selection?.anchorNode;
+    const focus = selection?.focusNode;
+    const withinCard = Boolean(
+      selection
+      && !selection.isCollapsed
+      && anchor
+      && focus
+      && articleRef.current?.contains(anchor)
+      && articleRef.current?.contains(focus)
+    );
+    setSelectedText(withinCard ? selection?.toString().trim() ?? "" : "");
   };
   const beginDrag = (event: ReactPointerEvent<HTMLElement>) => {
     if (event.button !== 0 || (event.target as HTMLElement).closest("button,input,textarea")) return;
     event.preventDefault();
     onSelect();
+    onMoveStart();
     const startX = event.clientX;
     const startY = event.clientY;
     const originalX = card.x;
     const originalY = card.y;
-    const move = (moveEvent: PointerEvent) => onChange({
-      x: Math.round(originalX + (moveEvent.clientX - startX) / viewport.scale),
-      y: Math.round(originalY + (moveEvent.clientY - startY) / viewport.scale)
-    });
+    const move = (moveEvent: PointerEvent) => onMove(
+      Math.round(originalX + (moveEvent.clientX - startX) / viewport.scale),
+      Math.round(originalY + (moveEvent.clientY - startY) / viewport.scale)
+    );
     const end = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", end);
       window.removeEventListener("pointercancel", end);
       window.removeEventListener("blur", end);
-      onCommit();
+      onMoveEnd();
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", end);
@@ -726,9 +828,11 @@ function CanvasTextCardNode({
   };
   return (
     <article
+      ref={articleRef}
       className="canvas-text-card"
       data-kind={card.kind}
       data-selected={selected || undefined}
+      data-view-mode={viewMode}
       style={{
         left: viewport.x + card.x * viewport.scale,
         top: viewport.y + card.y * viewport.scale,
@@ -742,23 +846,127 @@ function CanvasTextCardNode({
       }}
     >
       <header onPointerDown={beginDrag} title="拖动文字卡">
-        <span>{card.kind === "prompt" ? "PROMPT" : "REVIEW"}</span>
-        <strong title="标题由任务生成，已锁定">{card.title}</strong>
-        <button type="button" title="从画布移除文字卡" onClick={onRemove}>×</button>
+        <span className="text-card-kind">{card.kind === "prompt" ? "PROMPT" : "REVIEW"}</span>
+        <span className="text-card-heading">
+          <strong title="标题由任务生成，已锁定">{textCardDisplayTitle(card.title)}</strong>
+          <small>{workflowLabel}</small>
+        </span>
+        <button type="button" aria-label="从画布移除文字卡" title="从画布移除；GPT原始任务记录仍保留" onClick={onRemove}>×</button>
       </header>
-      <textarea
-        ref={textareaRef}
-        value={card.text}
-        aria-label={`${card.title}内容`}
-        spellCheck={false}
-        onChange={(event) => onChange({ text: event.target.value })}
-        onBlur={onCommit}
-      />
+
+      <nav className="text-card-section-nav" aria-label="返回内容章节">
+        {sections.map((section) => (
+          <button
+            key={section.id}
+            type="button"
+            aria-pressed={viewMode === "structured" && activeSection?.id === section.id}
+            data-active={viewMode === "structured" && activeSection?.id === section.id}
+            onClick={() => {
+              setViewMode("structured");
+              setActiveSectionId(section.id);
+              setSelectedText("");
+            }}
+          >{section.title}</button>
+        ))}
+        <button
+          type="button"
+          aria-pressed={viewMode === "raw"}
+          data-active={viewMode === "raw"}
+          onClick={() => {
+            setViewMode("raw");
+            setSelectedText("");
+          }}
+        >原文 / 编辑</button>
+      </nav>
+
+      {viewMode === "structured" ? (
+        <div
+          className="text-card-reading"
+          role="region"
+          aria-label={activeSection?.title ?? "返回内容"}
+          onMouseUp={captureStructuredSelection}
+          onKeyUp={captureStructuredSelection}
+        >
+          {activeSection ? (
+            <section>
+              <h4>{activeSection.title}</h4>
+              <p>{activeSection.content || "本章节没有返回内容。"}</p>
+            </section>
+          ) : <p className="text-card-empty">本次任务没有返回文字内容。</p>}
+        </div>
+      ) : (
+        <textarea
+          ref={textareaRef}
+          value={normalizedText}
+          aria-label={`${textCardDisplayTitle(card.title)}原文内容`}
+          spellCheck={false}
+          onChange={(event) => onChange({ text: event.target.value })}
+          onSelect={(event) => {
+            const target = event.currentTarget;
+            setSelectedText(target.value.slice(target.selectionStart, target.selectionEnd).trim());
+          }}
+          onBlur={onCommit}
+        />
+      )}
+
       <footer>
-        <button type="button" onClick={() => onUse(chosenText(true))}>使用选中</button>
-        <button type="button" className="text-card-primary" onClick={() => onUse(chosenText(false))}>用于下一步</button>
-        <button type="button" onClick={() => onCopy(chosenText(false))}>复制</button>
-        <button type="button" onClick={() => onSave(chosenText(false))}>存入库</button>
+        <div className="text-card-status" role="status" aria-live="polite">
+          <span data-state={saveState}>{saveLabel}</span>
+          <span data-handoff={card.handoffState ?? "pending"}>{textCardHandoffLabel(card.handoffState)}</span>
+          <span>{returnedTextCharacterCount(normalizedText).toLocaleString("zh-CN")}字</span>
+          {actionFeedback && <strong>{actionFeedback}</strong>}
+        </div>
+        <div className="text-card-actions">
+          {selectedText && (
+            <button
+              type="button"
+              className="text-card-selection-action"
+              onClick={() => {
+                onUse(selectedText);
+                announceFeedback(`已使用选中 ${returnedTextCharacterCount(selectedText).toLocaleString("zh-CN")}字`);
+              }}
+            >仅使用已选 {returnedTextCharacterCount(selectedText).toLocaleString("zh-CN")}字</button>
+          )}
+          <button
+            type="button"
+            disabled={actionPending !== null || !normalizedText}
+            onClick={async () => {
+              setActionPending("copy");
+              const copied = await onCopy(normalizedText);
+              setActionPending(null);
+              announceFeedback(copied ? "已复制全文" : "复制失败");
+            }}
+          >{actionPending === "copy" ? "复制中…" : "复制全文"}</button>
+          <button
+            type="button"
+            disabled={actionPending !== null || !nextTaskText}
+            onClick={async () => {
+              setActionPending("save");
+              const saved = await onSave(nextTaskText);
+              setActionPending(null);
+              announceFeedback(saved ? "已保存到提示词库" : "保存失败");
+            }}
+          >{actionPending === "save" ? "保存中…" : "保存到提示词库"}</button>
+          {card.kind === "prompt" && (
+            <button
+              type="button"
+              disabled={!nextTaskText}
+              onClick={() => {
+                onContinue(nextTaskText);
+                announceFeedback("已载入 02C 继续优化");
+              }}
+            >继续优化（02C）</button>
+          )}
+          <button
+            type="button"
+            className="text-card-primary"
+            disabled={!nextTaskText}
+            onClick={() => {
+              onUse(nextTaskText);
+              announceFeedback("已设为下一步输入");
+            }}
+          >{card.kind === "prompt" ? "载入原图输入框" : "作为下一步输入"} <span aria-hidden="true">→</span></button>
+        </div>
       </footer>
       <button
         type="button"
@@ -837,11 +1045,6 @@ interface ImageWorkflowBadge {
   status: ViewpointStatus;
   mode: "auto" | "manual";
   relation: "底图" | "候选" | "采用";
-}
-
-function defaultViewpointName(filename: string): string {
-  const stem = filename.replace(/\.[^.]+$/, "").trim();
-  return stem.replace(/_(AO|MaterialID|Transparent|SkyMask|Z-Depth|Reflection)$/i, "") || "未命名视角";
 }
 
 function viewpointAtStage(
@@ -983,6 +1186,7 @@ export function App({
   const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([]);
   const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null);
   const [selectedTextCardId, setSelectedTextCardId] = useState<string | null>(null);
+  const [selectedTextCardIds, setSelectedTextCardIds] = useState<string[]>([]);
   const [drawingId, setDrawingId] = useState<string | null>(null);
   const [textEditor, setTextEditor] = useState<TextEditorState | null>(null);
   const [middlePanning, setMiddlePanning] = useState(false);
@@ -1024,9 +1228,14 @@ export function App({
   const [savingProjectRequirements, setSavingProjectRequirements] = useState(false);
   const [selectedPromptId, setSelectedPromptId] = useState("");
   const [selectedFixedPromptId, setSelectedFixedPromptId] = useState("");
+  const [promptSearch, setPromptSearch] = useState("");
   const [promptTitle, setPromptTitle] = useState("");
+  const [promptDeleteConfirmId, setPromptDeleteConfirmId] = useState("");
   const [savingPrompt, setSavingPrompt] = useState(false);
   const [workbenchPanel, setWorkbenchPanel] = useState<"batch" | "prompts" | "preview" | "delivery" | null>(null);
+  const [contextPromptOpen, setContextPromptOpen] = useState(false);
+  const [contextInputFocusRequested, setContextInputFocusRequested] = useState(false);
+  const [loadedTextCardId, setLoadedTextCardId] = useState<CanvasTextCard["id"] | null>(null);
   const [generationTask, setGenerationTask] = useState<GenerationTask | null>(null);
   const [creatingTask, setCreatingTask] = useState(false);
   const [cancellingTask, setCancellingTask] = useState(false);
@@ -1056,11 +1265,14 @@ export function App({
   const transformerRef = useRef<Konva.Transformer>(null);
   const annotationTransformerRef = useRef<Konva.Transformer>(null);
   const textEditorRef = useRef<HTMLTextAreaElement>(null);
+  const taskInstructionRef = useRef<HTMLTextAreaElement>(null);
+  const conceptInstructionRef = useRef<HTMLTextAreaElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const inspectorRef = useRef<HTMLElement>(null);
   const nodeRefs = useRef(new Map<string, Konva.Group>());
   const annotationRefs = useRef(new Map<string, Konva.Group>());
+  const groupMoveRef = useRef<CanvasGroupMoveSnapshot | null>(null);
   const returnInFlightRef = useRef(false);
   const automationRunTaskRef = useRef<string | null>(null);
   const batchStartInFlightRef = useRef<string | null>(null);
@@ -1229,8 +1441,12 @@ export function App({
     releaseAllCanvasAssetObjectUrls();
   }, []);
 
-  const selectedNode = nodes.find((node) => node.id === selectedId) ?? null;
-  const selectedBatchNodes = useMemo(() => nodes.filter((node) => selectedNodeIds.includes(node.id)), [nodes, selectedNodeIds]);
+  const nodeIndex = useMemo(() => buildCanvasNodeIndex(nodes), [nodes]);
+  const selectedNode = selectedId ? nodeIndex.byId.get(selectedId) ?? null : null;
+  const selectedBatchNodes = useMemo(
+    () => selectedNodesInCanvasOrder(nodes, selectedNodeIds),
+    [nodes, selectedNodeIds]
+  );
   const normalizedCustomGptUrl = useMemo(() => normalizeCustomGptUrl(customGptUrl), [customGptUrl]);
   const activeTargetChatUrl = customGptEnabled ? normalizedCustomGptUrl ?? "" : "";
   const generationTargetReady = !customGptEnabled || Boolean(normalizedCustomGptUrl);
@@ -1249,17 +1465,19 @@ export function App({
     setNotice("可选专属 GPT 已保存并启用；可随时切回普通 GPT。");
   }, [customGptDraft]);
   const selectedAnnotation = annotations.find((annotation) => annotation.id === selectedAnnotationId) ?? null;
-  const structureBase = nodes.find((node) => node.id === structureBaseId) ?? null;
-  const styleReference = nodes.find((node) => node.id === styleReferenceId) ?? null;
+  const structureBase = structureBaseId ? nodeIndex.byId.get(structureBaseId) ?? null : null;
+  const styleReference = styleReferenceId ? nodeIndex.byId.get(styleReferenceId) ?? null : null;
+  const contextMode = selectionContextMode(selectedBatchNodes.length, selectedTextCardIds.length);
+  const singleTaskSource = contextMode === "single" ? selectedBatchNodes[0] ?? null : structureBase;
   const activeViewpoint = viewpoints.find((viewpoint) => viewpoint.id === activeViewpointId) ?? null;
   const activeViewpointHandoffs = activeViewpoint
     ? handoffs.filter((handoff) => handoff.viewpointId === activeViewpoint.id)
     : [];
   const activeViewpointSource = activeViewpoint?.sourceVersionId
-    ? nodes.find((node) => node.versionId === activeViewpoint.sourceVersionId) ?? null
+    ? nodeIndex.byVersionId.get(activeViewpoint.sourceVersionId) ?? null
     : null;
   const activeViewpointResult = activeViewpoint?.selectedVersionId
-    ? nodes.find((node) => node.versionId === activeViewpoint.selectedVersionId) ?? null
+    ? nodeIndex.byVersionId.get(activeViewpoint.selectedVersionId) ?? null
     : null;
   const viewpointInferences = useMemo(() => new Map(viewpoints.map((viewpoint) => [
     viewpoint.id,
@@ -1283,9 +1501,32 @@ export function App({
     ? viewpointInferences.get(selectedWorkflowViewpoint.id) ?? null
     : null;
   const activeWorkflowStage = selectedWorkflowViewpoint?.stage ?? bulkStage;
+  useEffect(() => {
+    if (contextMode !== "single" || !selectedWorkflowViewpoint || selectedWorkflowViewpoint.stage === "completed") return;
+    const stage = selectedWorkflowViewpoint.stage;
+    setBulkStage((current) => current === stage ? current : stage);
+    setWorkflowAction((current) => WORKFLOW_STAGE_ACTIONS[stage].includes(current)
+      ? current
+      : defaultWorkflowAction(stage));
+  }, [contextMode, selectedWorkflowViewpoint]);
+  useEffect(() => {
+    if (contextMode === "hidden") setContextPromptOpen(false);
+  }, [contextMode]);
+  useEffect(() => {
+    if (!contextInputFocusRequested || contextMode !== "single") return;
+    const frame = window.requestAnimationFrame(() => {
+      const input = taskInstructionRef.current;
+      if (input) {
+        input.focus({ preventScroll: true });
+        input.setSelectionRange(input.value.length, input.value.length);
+      }
+      setContextInputFocusRequested(false);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [contextInputFocusRequested, contextMode]);
   const finalGlassExportPreview = useMemo(() => viewpoints.flatMap((viewpoint) => (
     viewpoint.finalGlass.selectedVersionIds.flatMap((versionId, selectionIndex) => {
-      const node = nodes.find((candidate) => candidate.versionId === versionId);
+      const node = nodeIndex.byVersionId.get(versionId);
       return node?.origin === "generated"
         ? [{
             assetId: node.assetId,
@@ -1296,16 +1537,16 @@ export function App({
           }]
         : [];
     })
-  )), [nodes, viewpoints]);
+  )), [nodeIndex, viewpoints]);
   const finalGlassSelectionCount = finalGlassExportPreview.length;
-  const structureAnnotations = useMemo(() => structureBase
+  const structureAnnotations = useMemo(() => singleTaskSource
     ? annotations.filter((annotation) => annotationIntersectsRect(annotation, {
-      x: structureBase.x,
-      y: structureBase.y,
-      width: structureBase.width,
-      height: structureBase.height
+      x: singleTaskSource.x,
+      y: singleTaskSource.y,
+      width: singleTaskSource.width,
+      height: singleTaskSource.height
     }))
-    : [], [annotations, structureBase]);
+    : [], [annotations, singleTaskSource]);
   const generationActive = Boolean(generationTask && !isTerminalStatus(generationTask.status));
   const generationResultsPending = Boolean(
     generationTask?.status === "completed"
@@ -1315,7 +1556,7 @@ export function App({
   const taskPreview = useMemo(
     () => buildGenerationTaskPreview(
       taskInstruction,
-      structureBase,
+      singleTaskSource,
       styleReference,
       projectRequirements?.generationContext ?? "",
       generationMode,
@@ -1325,11 +1566,36 @@ export function App({
       generationMode,
       projectRequirements?.generationContext,
       structureAnnotations.length,
-      structureBase,
+      singleTaskSource,
       styleReference,
       taskInstruction
     ]
   );
+  const normalizedPromptSearch = promptSearch.trim().toLocaleLowerCase("zh-CN");
+  const filteredFixedPrompts = useMemo(() => FIXED_WORKFLOW_PROMPTS.filter((prompt) => (
+    !normalizedPromptSearch
+    || `${prompt.title} ${prompt.summary}`.toLocaleLowerCase("zh-CN").includes(normalizedPromptSearch)
+  )), [normalizedPromptSearch]);
+  const filteredProjectPrompts = useMemo(() => promptLibrary.filter((prompt) => (
+    !normalizedPromptSearch
+    || `${prompt.title} ${prompt.content}`.toLocaleLowerCase("zh-CN").includes(normalizedPromptSearch)
+  )), [normalizedPromptSearch, promptLibrary]);
+  const selectedPromptTemplate = selectedFixedPromptId
+    ? fixedWorkflowPromptById(selectedFixedPromptId)
+    : selectedPromptId
+      ? promptLibrary.find((item) => item.id === selectedPromptId) ?? null
+      : null;
+  const pairedSuCount = selectedBatchNodes.filter((source) => Boolean(preflightPairVersionIds[source.versionId])).length;
+  const batchStatusLabel = batchWorkbenchStatus({
+    selectedCount: selectedBatchNodes.length,
+    preparedCount: batchSourceVersionIds.length,
+    total: batchRun?.items.length ?? 0,
+    completed: currentBatchProgress.completed,
+    failed: currentBatchProgress.failed
+  });
+  const promptStatusLabel = promptWorkbenchStatus(FIXED_WORKFLOW_PROMPTS.length + promptLibrary.length);
+  const previewStatusLabel = previewWorkbenchStatus(taskPreview.ready, taskPreview.missing.length);
+  const deliveryStatusLabel = deliveryWorkbenchStatus(finalGlassSelectionCount, Boolean(deliveryTarget));
   const textEditorPosition = useMemo(() => {
     if (!textEditor) return null;
     const preferredLeft = viewport.x + textEditor.x * viewport.scale;
@@ -1353,7 +1619,8 @@ export function App({
     return placeImageContextToolbar(selectedNode, viewport, size, {
       minWidth: 620,
       maxWidth: 760,
-      height: 62
+      height: 62,
+      leftInset: 76
     });
   }, [
     manipulatingNodeId,
@@ -1361,6 +1628,40 @@ export function App({
     selectedAnnotationId,
     selectedNodeIds.length,
     selectedNode,
+    size,
+    tool,
+    viewport
+  ]);
+  const contextPanelPlacement = useMemo(() => {
+    if (
+      contextMode === "hidden"
+      || selectedAnnotationId
+      || tool !== "select"
+      || middlePanning
+      || manipulatingNodeId
+    ) return null;
+    const left = Math.min(...selectedBatchNodes.map((node) => node.x));
+    const top = Math.min(...selectedBatchNodes.map((node) => node.y));
+    const right = Math.max(...selectedBatchNodes.map((node) => node.x + node.width));
+    const bottom = Math.max(...selectedBatchNodes.map((node) => node.y + node.height));
+    return placeSelectionContextPanel(
+      { x: left, y: top, width: right - left, height: bottom - top },
+      viewport,
+      size,
+      {
+        minWidth: contextMode === "batch" ? 620 : 520,
+        maxWidth: contextMode === "batch" ? 780 : 720,
+        height: contextMode === "batch" ? 382 : 318,
+        leftInset: 76,
+        rightInset: 84
+      }
+    );
+  }, [
+    contextMode,
+    manipulatingNodeId,
+    middlePanning,
+    selectedAnnotationId,
+    selectedBatchNodes,
     size,
     tool,
     viewport
@@ -1705,8 +2006,10 @@ export function App({
     setStyleReferenceId(moved.snapshot.styleReferenceId);
     setTaskInstruction(moved.snapshot.taskInstruction);
     setSelectedId(null);
+    setSelectedNodeIds([]);
     setSelectedAnnotationId(null);
     setSelectedTextCardId(null);
+    setSelectedTextCardIds([]);
     setRevision((current) => current + 1);
     setHistoryVersion((current) => current + 1);
     setNotice(direction === -1 ? "已撤销上一步画布修改。" : "已重做画布修改。");
@@ -1773,6 +2076,56 @@ export function App({
     setRevision((current) => current + 1);
   }, []);
 
+  const beginCanvasGroupMove = useCallback((anchorKind: "image" | "text-card", anchorId: string) => {
+    const anchor = anchorKind === "image"
+      ? nodes.find((node) => node.id === anchorId)
+      : textCards.find((card) => card.id === anchorId);
+    if (!anchor) return;
+    const anchorAlreadySelected = anchorKind === "image"
+      ? selectedNodeIds.includes(anchorId)
+      : selectedTextCardIds.includes(anchorId);
+    const imageIds = new Set(anchorAlreadySelected ? selectedNodeIds : anchorKind === "image" ? [anchorId] : []);
+    const textCardIds = new Set(anchorAlreadySelected ? selectedTextCardIds : anchorKind === "text-card" ? [anchorId] : []);
+    if (!anchorAlreadySelected) {
+      setSelectedNodeIds([...imageIds]);
+      setSelectedTextCardIds([...textCardIds]);
+      setSelectedId(anchorKind === "image" ? anchorId : null);
+      setSelectedTextCardId(anchorKind === "text-card" ? anchorId : null);
+      setSelectedAnnotationId(null);
+    }
+    groupMoveRef.current = {
+      anchorKind,
+      anchorId,
+      anchorX: anchor.x,
+      anchorY: anchor.y,
+      imageIds,
+      textCardIds,
+      nodes,
+      textCards
+    };
+  }, [nodes, selectedNodeIds, selectedTextCardIds, textCards]);
+
+  const moveCanvasGroup = useCallback((anchorKind: "image" | "text-card", anchorId: string, x: number, y: number) => {
+    const snapshot = groupMoveRef.current;
+    if (!snapshot || snapshot.anchorKind !== anchorKind || snapshot.anchorId !== anchorId) return;
+    const deltaX = Math.round(x - snapshot.anchorX);
+    const deltaY = Math.round(y - snapshot.anchorY);
+    setNodes(translateSelectedObjects(snapshot.nodes, snapshot.imageIds, deltaX, deltaY));
+    setTextCards(translateSelectedObjects(snapshot.textCards, snapshot.textCardIds, deltaX, deltaY));
+  }, []);
+
+  const endCanvasGroupMove = useCallback(() => {
+    const snapshot = groupMoveRef.current;
+    if (!snapshot) return;
+    groupMoveRef.current = null;
+    const updatedAt = new Date().toISOString();
+    setTextCards((current) => current.map((card) => snapshot.textCardIds.has(card.id)
+      ? { ...card, updatedAt }
+      : card));
+    setRevision((current) => current + 1);
+    setNotice(`已移动 ${snapshot.imageIds.size + snapshot.textCardIds.size} 个画布对象。`);
+  }, []);
+
   const canvasPoint = useCallback(() => {
     const pointer = stageRef.current?.getPointerPosition();
     if (!pointer) return null;
@@ -1789,6 +2142,8 @@ export function App({
     setSelectedId(null);
     setSelectedNodeIds([]);
     setSelectedAnnotationId(null);
+    setSelectedTextCardId(null);
+    setSelectedTextCardIds([]);
   }, [canvasPoint]);
 
   const continueMarquee = useCallback(() => {
@@ -1801,22 +2156,25 @@ export function App({
 
   const endMarquee = useCallback(() => {
     if (!marquee) return false;
-    const selected = marquee.width * viewport.scale >= 4 && marquee.height * viewport.scale >= 4
-      ? selectNodesInRect(nodes, marquee)
-      : [];
-    setSelectedNodeIds(selected.map((node) => node.id));
-    setSelectedId(selected.at(-1)?.id ?? null);
+    const selection = marquee.width * viewport.scale >= 4 && marquee.height * viewport.scale >= 4
+      ? selectMixedCanvasObjectsInRect(nodes, textCards, marquee)
+      : { imageIds: [], textCardIds: [] };
+    const selectedCount = selection.imageIds.length + selection.textCardIds.length;
+    setSelectedNodeIds(selection.imageIds);
+    setSelectedTextCardIds(selection.textCardIds);
+    setSelectedId(selection.imageIds.at(-1) ?? null);
+    setSelectedTextCardId(selection.textCardIds.at(-1) ?? null);
     setSelectedAnnotationId(null);
     setMarquee(null);
     setTool("select");
-    if (selected.length > 1) {
+    if (selectedCount > 1) {
       window.requestAnimationFrame(() => inspectorRef.current?.scrollTo({ top: 0, behavior: "smooth" }));
     }
-    setNotice(selected.length
-      ? `已批量框选 ${selected.length} 张图片；可在画布工作台统一设置阶段并发送。`
-      : "框选范围内没有图片。");
+    setNotice(selectedCount
+      ? `已框选 ${selectedCount} 个对象（${selection.imageIds.length} 张图片、${selection.textCardIds.length} 张文字卡）；拖动任一已选对象可整体移动。`
+      : "框选范围内没有图片或文字卡。");
     return true;
-  }, [marquee, nodes, viewport.scale]);
+  }, [marquee, nodes, textCards, viewport.scale]);
 
   const beginAnnotation = useCallback(() => {
     if (tool === "select" || tool === "marquee") return;
@@ -2051,6 +2409,11 @@ export function App({
         target?.matches("input, textarea, select, button")
         || target?.isContentEditable
       );
+      if (event.key === "Escape" && workbenchPanel && !textEditor && !target?.matches("input, textarea, select")) {
+        event.preventDefault();
+        setWorkbenchPanel(null);
+        return;
+      }
       const key = event.key.toLowerCase();
       if (!editableTarget && (event.ctrlKey || event.metaKey) && !event.altKey) {
         if (key === "z") {
@@ -2077,9 +2440,13 @@ export function App({
           });
           return;
         }
-        if (selectedNode) {
+        if (selectedNodeIds.length || selectedTextCardIds.length) {
           event.preventDefault();
-          updateNode({ ...selectedNode, x: selectedNode.x + dx, y: selectedNode.y + dy });
+          const imageIds = new Set(selectedNodeIds);
+          const textCardIds = new Set(selectedTextCardIds);
+          setNodes((current) => translateSelectedObjects(current, imageIds, dx, dy));
+          setTextCards((current) => translateSelectedObjects(current, textCardIds, dx, dy));
+          setRevision((current) => current + 1);
           return;
         }
       }
@@ -2135,9 +2502,12 @@ export function App({
     selectedAnnotationId,
     selectedId,
     selectedNode,
+    selectedNodeIds,
+    selectedTextCardIds,
     textEditor,
     updateAnnotation,
-    updateNode
+    updateNode,
+    workbenchPanel
   ]);
 
   const exportAnnotationImage = useCallback(async () => {
@@ -2347,80 +2717,141 @@ export function App({
       return;
     }
     const source = card.sourceVersionId
-      ? nodes.find((node) => node.versionId === card.sourceVersionId) ?? null
+      ? nodeIndex.byVersionId.get(card.sourceVersionId) ?? null
       : null;
     if (source) {
+      const selection = selectionAfterTextCardHandoff(source.id);
       setStructureBaseId(source.id);
-      setSelectedId(source.id);
-      setSelectedNodeIds([source.id]);
+      setSelectedId(selection.selectedId);
+      setSelectedNodeIds(selection.selectedNodeIds);
+      setSelectedAnnotationId(selection.selectedAnnotationId);
+      setSelectedTextCardId(selection.selectedTextCardId);
+      setSelectedTextCardIds(selection.selectedTextCardIds);
+      setTool("select");
+      setWorkbenchPanel(null);
+      setContextInputFocusRequested(true);
     }
     setTaskInstruction(content);
     setPromptTitle(card.title);
-    setWorkflowAction(card.kind === "prompt" ? "generate" : "prompt");
+    setWorkflowAction(nextWorkflowActionForTextCard(card.kind));
     setSelectedFixedPromptId("");
     setSelectedPromptId("");
-    setWorkbenchPanel("preview");
+    setContextPromptOpen(false);
+    setLoadedTextCardId(card.id);
+    setTextCards((current) => current.map((item) => item.id === card.id
+      ? { ...item, handoffState: "loaded", updatedAt: new Date().toISOString() }
+      : item));
     setRevision((current) => current + 1);
     setNotice(card.kind === "prompt"
-      ? "提示词已进入下一步；已切换为“按提示词生成图片”。"
+      ? "提示词已载入原图输入框；已切换为“按提示词生成图片”，确认后再发送。"
       : "审查文字已进入下一步；已切换为“生成／优化提示词”。");
-  }, [nodes]);
+  }, [nodeIndex]);
+
+  const continueTextCardOptimization = useCallback((card: CanvasTextCard, text: string) => {
+    const content = extractFinalPrompt(text).trim();
+    const optimizer = fixedWorkflowPromptById("fixed_prompt_optimizer");
+    if (!content || !optimizer) {
+      setNotice("当前提示词无法进入 02C 优化。");
+      return;
+    }
+    const source = card.sourceVersionId ? nodeIndex.byVersionId.get(card.sourceVersionId) ?? null : null;
+    if (source) {
+      const selection = selectionAfterTextCardHandoff(source.id);
+      setStructureBaseId(source.id);
+      setSelectedId(selection.selectedId);
+      setSelectedNodeIds(selection.selectedNodeIds);
+      setSelectedAnnotationId(selection.selectedAnnotationId);
+      setSelectedTextCardId(selection.selectedTextCardId);
+      setSelectedTextCardIds(selection.selectedTextCardIds);
+      setTool("select");
+      setWorkbenchPanel(null);
+      setContextInputFocusRequested(true);
+    }
+    setTaskInstruction(buildPromptOptimizerInput(content, optimizer.content));
+    setPromptTitle(`${textCardDisplayTitle(card.title)}｜02C优化`);
+    setBulkStage("scene-optimization");
+    setWorkflowAction("prompt");
+    setSelectedFixedPromptId(optimizer.id);
+    setSelectedPromptId("");
+    setContextPromptOpen(false);
+    setLoadedTextCardId(card.id);
+    setTextCards((current) => current.map((item) => item.id === card.id
+      ? { ...item, handoffState: "loaded", updatedAt: new Date().toISOString() }
+      : item));
+    setRevision((current) => current + 1);
+    setNotice("已基于当前提示词建立 02C 优化输入；发送后会生成新的结果卡，不覆盖原 02B 卡。");
+  }, [nodeIndex]);
 
   const copyTextCardContent = useCallback(async (text: string) => {
     try {
       await navigator.clipboard.writeText(text);
       setNotice("文字卡内容已复制。");
+      return true;
     } catch {
       setNotice("复制失败，请检查浏览器剪贴板权限。");
+      return false;
     }
   }, []);
 
   const saveTextCardToLibrary = useCallback(async (card: CanvasTextCard, text: string) => {
     const content = text.trim();
-    if (!content) return;
+    if (!content) return false;
     try {
       const saved = await savePromptLibraryItem(card.title, content);
       setPromptLibrary((current) => [saved, ...current.filter((item) => item.id !== saved.id)]);
       setSelectedPromptId(saved.id);
       setSelectedFixedPromptId("");
       setNotice(`已从文字卡保存到提示词库：${saved.title}`);
+      return true;
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "文字卡保存到提示词库失败");
+      return false;
     }
   }, []);
 
   const removeTextCard = useCallback((card: CanvasTextCard) => {
     setTextCards((current) => current.filter((item) => item.id !== card.id));
     setSelectedTextCardId((current) => current === card.id ? null : current);
+    setSelectedTextCardIds((current) => current.filter((id) => id !== card.id));
     setRevision((current) => current + 1);
     setNotice(`已从画布移除文字卡“${card.title}”；GPT原始任务记录仍保留。`);
   }, []);
 
-  const applyFixedWorkflowPrompt = useCallback((id: string) => {
+  const applyFixedWorkflowPrompt = useCallback((id: string, mode: PromptApplyMode = "replace") => {
     const template = fixedWorkflowPromptById(id);
     if (!template) return;
     setSelectedFixedPromptId(template.id);
     setSelectedPromptId("");
-    setTaskInstruction(template.content);
+    setTaskInstruction((current) => combinePromptText(current, template.content, mode));
     setPromptTitle(template.title);
     if (template.stage) changeBulkStage(template.stage);
     if (template.action) setWorkflowAction(template.action);
     setWorkbenchPanel(null);
+    setContextPromptOpen(false);
     setRevision((current) => current + 1);
-    setNotice(`已套用固定工作流卡：${template.title}。方括号内容可按项目补充。`);
+    setNotice(`${mode === "append" ? "已追加" : "已套用"}工作流预设：${template.title}。方括号内容可按项目补充。`);
   }, [changeBulkStage]);
 
-  const applyPromptTemplate = useCallback((id: string) => {
+  const applyPromptTemplate = useCallback((id: string, mode: PromptApplyMode = "replace") => {
     setSelectedPromptId(id);
     setSelectedFixedPromptId("");
     const template = promptLibrary.find((item) => item.id === id);
     if (!template) return;
-    setTaskInstruction(template.content);
+    setTaskInstruction((current) => combinePromptText(current, template.content, mode));
     setPromptTitle(template.title);
     setWorkbenchPanel(null);
+    setContextPromptOpen(false);
     setRevision((current) => current + 1);
-    setNotice(`已套用提示词：${template.title}`);
+    setNotice(`${mode === "append" ? "已追加" : "已套用"}项目提示词：${template.title}`);
   }, [promptLibrary]);
+
+  const applySelectedPrompt = useCallback((mode: PromptApplyMode) => {
+    if (selectedFixedPromptId) {
+      applyFixedWorkflowPrompt(selectedFixedPromptId, mode);
+      return;
+    }
+    if (selectedPromptId) applyPromptTemplate(selectedPromptId, mode);
+  }, [applyFixedWorkflowPrompt, applyPromptTemplate, selectedFixedPromptId, selectedPromptId]);
 
   const beginProjectRequirementsEdit = useCallback(() => {
     if (!projectRequirements) return;
@@ -2453,7 +2884,7 @@ export function App({
     }
   }, [projectRequirementsDraft, savingProjectRequirements]);
 
-  const saveCurrentPrompt = useCallback(async () => {
+  const saveCurrentPrompt = useCallback(async (asNew = false) => {
     const title = promptTitle.trim();
     const content = taskInstruction.trim();
     if (!title || !content || savingPrompt) {
@@ -2465,7 +2896,7 @@ export function App({
       const saved = await savePromptLibraryItem(
         title,
         content,
-        selectedPromptId || undefined
+        asNew ? undefined : selectedPromptId || undefined
       );
       setPromptLibrary((current) => [
         saved,
@@ -2473,7 +2904,8 @@ export function App({
       ]);
       setSelectedPromptId(saved.id);
       setSelectedFixedPromptId("");
-      setNotice(`提示词已保存到仓库：${saved.title}`);
+      setPromptDeleteConfirmId("");
+      setNotice(`${asNew ? "提示词已另存到" : "提示词已保存到"}项目提示词库：${saved.title}`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "提示词保存失败");
     } finally {
@@ -2490,7 +2922,8 @@ export function App({
       setPromptLibrary((items) => items.filter((item) => item.id !== selectedPromptId));
       setSelectedPromptId("");
       setPromptTitle("");
-      setNotice(`已从提示词仓库移除：${current?.title ?? "未命名提示词"}`);
+      setPromptDeleteConfirmId("");
+      setNotice(`已从项目提示词库移除：${current?.title ?? "未命名提示词"}；输入框内容保持不变。`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "提示词删除失败");
     } finally {
@@ -2504,7 +2937,7 @@ export function App({
       return;
     }
     const viewpoint = createViewpointStatusCard({
-      name: defaultViewpointName(selectedNode.name),
+      name: viewpointNameFromFilename(selectedNode.name),
       stage: "preflight",
       sourceVersionId: selectedNode.parentVersionId ?? selectedNode.versionId,
       selectedVersionId: selectedNode.origin === "generated" ? selectedNode.versionId : null
@@ -2552,7 +2985,7 @@ export function App({
         firstViewpointId ??= current.id;
       } else {
         const viewpoint = createViewpointStatusCard({
-          name: defaultViewpointName(source.name),
+          name: viewpointNameFromFilename(source.name),
           stage,
           sourceVersionId,
           selectedVersionId: source.origin === "generated" ? source.versionId : null,
@@ -2594,7 +3027,7 @@ export function App({
       }
       const created = createViewpointStatusCard({
         id: nextActiveId,
-        name: defaultViewpointName(selectedNode.name),
+        name: viewpointNameFromFilename(selectedNode.name),
         stage: "preflight",
         sourceVersionId,
         selectedVersionId: selectedNode.origin === "generated" ? selectedNode.versionId : null,
@@ -2626,13 +3059,16 @@ export function App({
     }
     try {
       applyStageToNodes(selectedBatchNodes, bulkStage, false);
-      const prompt = workflowStagePrompt(bulkStage, workflowAction);
+      const prompt = appendUnifiedTaskRequirement(
+        workflowStagePrompt(bulkStage, workflowAction),
+        taskInstruction
+      );
       const suReferenceBySourceVersionId = new Map<`version_${string}`, ImageNodeState>();
       if (bulkStage === "preflight") {
         for (const source of selectedBatchNodes) {
           const pairedVersionId = preflightPairVersionIds[source.versionId];
           const paired = pairedVersionId
-            ? nodes.find((node) => node.versionId === pairedVersionId) ?? null
+            ? nodeIndex.byVersionId.get(pairedVersionId) ?? null
             : null;
           if (paired) suReferenceBySourceVersionId.set(source.versionId, paired);
         }
@@ -2698,6 +3134,16 @@ export function App({
       }));
       setBatchSourceVersionIds(selectedBatchNodes.map((node) => node.versionId));
       setBatchRun({ ...run, status: "running", updatedAt: new Date().toISOString() });
+      const usedTextCardId = loadedTextCardId ?? textCards.find((card) => (
+        card.handoffState === "loaded"
+        && selectedBatchNodes.some((node) => node.versionId === card.sourceVersionId)
+      ))?.id ?? null;
+      if (usedTextCardId) {
+        setTextCards((current) => current.map((card) => card.id === usedTextCardId
+          ? { ...card, handoffState: "used", updatedAt: new Date().toISOString() }
+          : card));
+        setLoadedTextCardId(null);
+      }
       setGenerationMode("reference-edit");
       setRevision((current) => current + 1);
       setNotice(`已建立 ${run.items.length} 个${WORKFLOW_STAGE_LABELS[bulkStage]}任务组；本轮动作：${WORKFLOW_ACTION_LABELS[workflowAction]}。`);
@@ -2713,12 +3159,15 @@ export function App({
     generationResultsPending,
     activeTargetChatUrl,
     generationTargetReady,
-    nodes,
+    loadedTextCardId,
+    nodeIndex,
     preflightPairVersionIds,
     returningResults,
     selectedBatchNodes,
     structureBase,
     styleReference,
+    taskInstruction,
+    textCards,
     workflowAction
   ]);
 
@@ -2892,17 +3341,17 @@ export function App({
         relativePath: attachment.relativePath
       }));
       if (
-        structureBase
+        singleTaskSource
         && structureAnnotations.length
         && attachments.some((attachment) => attachment.role === "annotation-map")
       ) {
         setNotice("正在把结构图与批注合成为任务附件，原图保持不变…");
-        const originalSrc = await readCanvasAssetAsDataUrl(structureBase.assetId, "original");
+        const originalSrc = await readCanvasAssetAsDataUrl(singleTaskSource.assetId, "original");
         const dataUrl = await renderAnnotationExport(
-          { ...structureBase, src: originalSrc },
+          { ...singleTaskSource, src: originalSrc },
           structureAnnotations
         );
-        const stem = structureBase.name.replace(/\.[^.]+$/, "");
+        const stem = singleTaskSource.name.replace(/\.[^.]+$/, "");
         const exported = await saveAnnotationExport(`任务批注_${stem}.png`, dataUrl);
         attachments = attachments.map((attachment) => attachment.role === "annotation-map"
           ? {
@@ -2927,9 +3376,19 @@ export function App({
           `桥接服务没有接受 ${PROVIDER_LABELS[generationProvider]} 来源；任务已取消，请重启本地服务后重试。`
         );
       }
-      setTaskParentVersionId(structureBase?.versionId ?? null);
+      setTaskParentVersionId(singleTaskSource?.versionId ?? null);
       setReturnedResultIds([]);
       setGenerationTask(task);
+      const usedTextCardId = loadedTextCardId ?? textCards.find((card) => (
+        card.handoffState === "loaded"
+        && card.sourceVersionId === singleTaskSource?.versionId
+      ))?.id ?? null;
+      if (usedTextCardId) {
+        setTextCards((current) => current.map((card) => card.id === usedTextCardId
+          ? { ...card, handoffState: "used", updatedAt: new Date().toISOString() }
+          : card));
+        setLoadedTextCardId(null);
+      }
       automationRunTaskRef.current = task.id;
       document.documentElement.setAttribute("data-gpt-canvas-task-id", task.id);
       window.dispatchEvent(new Event("gpt-canvas-run-task"));
@@ -2946,10 +3405,12 @@ export function App({
     generationTargetReady,
     generationProvider,
     generationTask,
+    loadedTextCardId,
     normalizedCustomGptUrl,
     structureAnnotations,
-    structureBase,
+    singleTaskSource,
     taskPreview,
+    textCards,
     workflowAction
   ]);
 
@@ -2957,7 +3418,7 @@ export function App({
     if (!automationReady || !generationTargetReady || creatingTask || returningResults || generationActive || generationResultsPending) return;
     const uniqueVersionIds = [...new Set(batchSourceVersionIds)];
     const sources = uniqueVersionIds
-      .map((versionId) => nodes.find((node) => node.versionId === versionId))
+      .map((versionId) => nodeIndex.byVersionId.get(versionId))
       .filter((node): node is ImageNodeState => Boolean(node))
       .filter((node) => node.versionId !== styleReference?.versionId);
     if (!sources.length) {
@@ -2990,7 +3451,7 @@ export function App({
     generationTargetReady,
     generationActive,
     generationResultsPending,
-    nodes,
+    nodeIndex,
     normalizedCustomGptUrl,
     returningResults,
     styleReference,
@@ -3037,7 +3498,7 @@ export function App({
   const startBatchItem = useCallback(async (run: CanvasBatchRun, item: CanvasBatchItem) => {
     if (batchStartInFlightRef.current) return;
     batchStartInFlightRef.current = item.id;
-    const source = nodes.find((node) => node.versionId === item.sourceVersionId) ?? null;
+    const source = nodeIndex.byVersionId.get(item.sourceVersionId) ?? null;
     if (!source) {
       setBatchRun((current) => current ? {
         ...updateBatchItem(current, item.id, { status: "failed", error: "源图片已不在画布中" }),
@@ -3049,7 +3510,7 @@ export function App({
       return;
     }
     const frozenStyleReference = run.styleReferenceVersionId
-      ? nodes.find((node) => node.versionId === run.styleReferenceVersionId) ?? null
+      ? nodeIndex.byVersionId.get(run.styleReferenceVersionId) ?? null
       : null;
     const sourceAnnotations = annotations.filter((annotation) => annotationIntersectsRect(annotation, {
       x: source.x,
@@ -3071,7 +3532,7 @@ export function App({
     try {
       const stageAttachmentNodes = stageOnly
         ? (item.attachmentVersionIds ?? [source.versionId]).map((versionId) => (
-          nodes.find((node) => node.versionId === versionId) ?? null
+          nodeIndex.byVersionId.get(versionId) ?? null
         ))
         : [];
       if (stageOnly && stageAttachmentNodes.some((node) => !node)) {
@@ -3148,7 +3609,7 @@ export function App({
       batchStartInFlightRef.current = null;
       setCreatingTask(false);
     }
-  }, [annotations, currentBatchProgress, nodes, projectName, projectRequirements?.generationContext]);
+  }, [annotations, currentBatchProgress, nodeIndex, projectName, projectRequirements?.generationContext]);
 
   useEffect(() => {
     if (
@@ -3200,7 +3661,7 @@ export function App({
     if (textCompleted && generationTask.textResult && !textCards.some((card) => card.taskId === generationTask.id)) {
       const sourceVersionId = item?.sourceVersionId ?? taskParentVersionId;
       const source = sourceVersionId
-        ? nodes.find((candidate) => candidate.versionId === sourceVersionId) ?? null
+        ? nodeIndex.byVersionId.get(sourceVersionId) ?? null
         : structureBase;
       const action = batchRun?.workflowAction
         ?? (generationTask.prompt.includes("【最终生成提示词】") ? "prompt" : "analyze");
@@ -3208,23 +3669,31 @@ export function App({
       const siblingCount = textCards.filter((card) => card.sourceVersionId === sourceVersionId).length;
       const card = createCanvasTextCard({
         kind,
-        title: `${source ? defaultViewpointName(source.name) : "当前任务"}｜${kind === "prompt" ? "生成提示词" : "审查结论"}`,
+        title: `${source ? viewpointNameFromFilename(source.name) : "当前任务"}｜${kind === "prompt" ? "生成提示词" : "审查结论"}`,
         text: generationTask.textResult.text,
         sourceVersionId: sourceVersionId ?? null,
         taskId: generationTask.id,
+        workflowLabel: inferTextCardWorkflowLabel({
+          workflowStage: batchRun?.workflowStage ?? null,
+          action,
+          hasStyleReference: generationTask.attachments.some((attachment) => attachment.role === "style-reference"),
+          prompt: generationTask.prompt,
+          kind
+        }),
         sourceBounds: source,
         siblingCount
       });
       saveReturnedTextCardImmediatelyRef.current = true;
       setTextCards((current) => [...current, card]);
       setSelectedTextCardId(card.id);
+      setSelectedTextCardIds([card.id]);
       setSelectedId(null);
       setSelectedNodeIds([]);
       setSelectedAnnotationId(null);
       const relatedVersionIds = new Set<`version_${string}`>();
       for (const versionId of item?.attachmentVersionIds ?? (sourceVersionId ? [sourceVersionId] : [])) {
         relatedVersionIds.add(versionId);
-        const node = nodes.find((candidate) => candidate.versionId === versionId);
+        const node = nodeIndex.byVersionId.get(versionId);
         if (node?.parentVersionId) relatedVersionIds.add(node.parentVersionId);
       }
       const conclusion = workflowConclusionFromText(generationTask.textResult.text);
@@ -3271,7 +3740,7 @@ export function App({
       setRevision((current) => current + 1);
       setNotice(`批量队列已暂停：${item.sourceName} ${message}`);
     }
-  }, [batchRun, generationTask, nodes, structureBase, taskParentVersionId, textCards]);
+  }, [batchRun, generationTask, nodeIndex, structureBase, taskParentVersionId, textCards]);
 
   const cancelActiveTask = useCallback(async () => {
     if (!generationTask || isTerminalStatus(generationTask.status) || cancellingTask) return;
@@ -3300,7 +3769,7 @@ export function App({
 
   const returnResultsToCanvas = useCallback(async () => {
     if (!generationTask || !generationTask.results.length || returningResults || returnInFlightRef.current) return;
-    const parent = nodes.find((node) => node.versionId === taskParentVersionId) ?? structureBase;
+    const parent = (taskParentVersionId ? nodeIndex.byVersionId.get(taskParentVersionId) : null) ?? structureBase;
     if (!parent && generationTask.taskType !== "new") {
       setNotice("无法确定生成结果的父节点，请重新指定结构基准。");
       return;
@@ -3319,7 +3788,7 @@ export function App({
       const isGlassFullFrameTask = (
         batchRun?.workflowStage === "final-glass" && Boolean(activeBatchItem)
       ) || generationTask.prompt.includes("最终阶段·整图玻璃深化");
-      for (const [index, result] of pending.entries()) {
+      for (const result of pending) {
         const dataUrl = await readGenerationResultAsDataUrl(generationTask.id, result.id);
         const rawImported = await saveGeneratedAsset(result.filename, dataUrl);
         if (isGlassFullFrameTask && parent && !aspectRatiosMatch(
@@ -3372,13 +3841,20 @@ export function App({
           outputRatio: "free"
         };
         const child = parent
-          ? placeChildToRight(parent, nextNode)
+          ? placeChildToRightStacked(
+            parent,
+            nextNode,
+            [
+              ...(nodeIndex.childrenByParentVersionId.get(parent.versionId) ?? []),
+              ...children
+            ]
+          )
           : {
             ...nextNode,
             x: (size.width / 2 - viewport.x) / viewport.scale,
             y: (size.height / 2 - viewport.y) / viewport.scale - frame.height / 2
           };
-        children.push({ ...child, x: child.x + index * (frame.width + 64) });
+        children.push(child);
       }
       setNodes((current) => [...current, ...children]);
       if (parent && children.length) {
@@ -3497,7 +3973,7 @@ export function App({
     const batchItem = batchRun?.items.find((item) => item.taskId === generationTask.id) ?? null;
     const sourceVersionId = batchItem?.sourceVersionId ?? taskParentVersionId;
     const source = sourceVersionId
-      ? nodes.find((node) => node.versionId === sourceVersionId) ?? null
+      ? nodeIndex.byVersionId.get(sourceVersionId) ?? null
       : structureBase;
     const hasReturnedNode = nodes.some((node) => node.taskId === generationTask.id);
     if (
@@ -3512,25 +3988,28 @@ export function App({
     return {
       taskId: generationTask.id,
       source,
-      bounds: generationPlaceholderBounds(source),
+      bounds: generationPlaceholderBounds(
+        source,
+        nodeIndex.childrenByParentVersionId.get(source.versionId) ?? []
+      ),
       canCancel: !isTerminalStatus(generationTask.status)
     };
-  }, [batchRun, generationTask, nodes, structureBase, taskParentVersionId]);
+  }, [batchRun, generationTask, nodeIndex, nodes, structureBase, taskParentVersionId]);
 
   const generationRelations = useMemo(() => {
     const imageRelations = nodes.flatMap((child) => {
-    if (!child.parentVersionId) return [];
-    const parent = nodes.find((candidate) => candidate.versionId === child.parentVersionId);
-    if (!parent) return [];
-    const relation = buildCanvasRelation(parent, child);
-    return [{
-      id: `${parent.id}-${child.id}`,
-      points: relation.points
-    }];
+      if (!child.parentVersionId) return [];
+      const parent = nodeIndex.byVersionId.get(child.parentVersionId);
+      if (!parent) return [];
+      const relation = buildCanvasRelation(parent, child);
+      return [{
+        id: `${parent.id}-${child.id}`,
+        points: relation.points
+      }];
     });
     const cardRelations = textCards.flatMap((card) => {
       if (!card.sourceVersionId) return [];
-      const parent = nodes.find((candidate) => candidate.versionId === card.sourceVersionId);
+      const parent = nodeIndex.byVersionId.get(card.sourceVersionId);
       if (!parent) return [];
       return [{ id: `${parent.id}-${card.id}`, points: buildCanvasRelation(parent, card).points }];
     });
@@ -3541,7 +4020,7 @@ export function App({
       }]
       : [];
     return [...imageRelations, ...cardRelations, ...placeholderRelation];
-  }, [generationPlaceholder, nodes, textCards]);
+  }, [generationPlaceholder, nodeIndex, nodes, textCards]);
 
   const imageWorkflowBadges = useMemo(() => {
     const badges = new Map<string, ImageWorkflowBadge>();
@@ -3549,7 +4028,7 @@ export function App({
       const inference = viewpointInferences.get(viewpoint.id);
       if (!inference) continue;
       if (viewpoint.sourceVersionId) {
-        for (const candidate of nodes.filter((node) => node.parentVersionId === viewpoint.sourceVersionId)) {
+        for (const candidate of nodeIndex.childrenByParentVersionId.get(viewpoint.sourceVersionId) ?? []) {
           badges.set(candidate.versionId, {
             stage: viewpoint.stage,
             status: inference.status,
@@ -3574,7 +4053,7 @@ export function App({
       }
     }
     return badges;
-  }, [nodes, viewpointInferences, viewpoints]);
+  }, [nodeIndex, viewpointInferences, viewpoints]);
 
   const visibleImageNodeIds = useMemo(() => {
     const margin = 320 / viewport.scale;
@@ -3592,6 +4071,79 @@ export function App({
       .map((node) => node.id));
   }, [nodes, size.height, size.width, viewport]);
 
+  const canvasObjectGroups = useMemo<CanvasObjectGroup[]>(() => [
+    {
+      label: "图片",
+      options: nodes.map((node, index) => ({
+        kind: "image" as const,
+        id: node.id,
+        label: `${index + 1}. ${node.name}`
+      }))
+    },
+    {
+      label: "提示词卡",
+      options: textCards.map((card, index) => ({
+        kind: "text-card" as const,
+        id: card.id,
+        label: `${index + 1}. ${card.title}`
+      }))
+    },
+    {
+      label: "批注",
+      options: annotations.map((annotation, index) => ({
+        kind: "annotation" as const,
+        id: annotation.id,
+        label: `${index + 1}. ${annotationTypeLabel(annotation.type)}${annotation.comment ? ` · ${annotation.comment}` : ""}`
+      }))
+    }
+  ], [annotations, nodes, textCards]);
+  const selectedCanvasObjectValue = selectedAnnotationId
+    ? encodeCanvasObjectValue("annotation", selectedAnnotationId)
+    : selectedTextCardId
+      ? encodeCanvasObjectValue("text-card", selectedTextCardId)
+      : selectedId
+        ? encodeCanvasObjectValue("image", selectedId)
+        : "";
+  const selectCanvasObject = useCallback((value: string) => {
+    const selection = decodeCanvasObjectValue(value);
+    if (!selection) {
+      setSelectedId(null);
+      setSelectedNodeIds([]);
+      setSelectedAnnotationId(null);
+      setSelectedTextCardId(null);
+      setSelectedTextCardIds([]);
+      return;
+    }
+    setTool("select");
+    if (selection.kind === "image") {
+      const node = nodeIndex.byId.get(selection.id);
+      if (!node) return;
+      setSelectedId(node.id);
+      setSelectedNodeIds([node.id]);
+      setSelectedAnnotationId(null);
+      setSelectedTextCardId(null);
+      setSelectedTextCardIds([]);
+      return;
+    }
+    if (selection.kind === "text-card") {
+      const card = textCards.find((candidate) => candidate.id === selection.id);
+      if (!card) return;
+      setSelectedId(null);
+      setSelectedNodeIds([]);
+      setSelectedAnnotationId(null);
+      setSelectedTextCardId(card.id);
+      setSelectedTextCardIds([card.id]);
+      return;
+    }
+    const annotation = annotations.find((candidate) => candidate.id === selection.id);
+    if (!annotation) return;
+    setSelectedId(null);
+    setSelectedNodeIds([]);
+    setSelectedTextCardId(null);
+    setSelectedTextCardIds([]);
+    setSelectedAnnotationId(annotation.id);
+  }, [annotations, nodeIndex, textCards]);
+
   return (
     <div className="app-shell">
       <a className="skip-link" href="#canvas-main">跳到画布</a>
@@ -3601,6 +4153,8 @@ export function App({
           ref={imageInputRef}
           className="visually-hidden"
           type="file"
+          tabIndex={-1}
+          aria-hidden="true"
           multiple
           accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp"
           onChange={(event) => {
@@ -3612,6 +4166,8 @@ export function App({
           ref={folderInputRef}
           className="visually-hidden"
           type="file"
+          tabIndex={-1}
+          aria-hidden="true"
           multiple
           accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp"
           {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
@@ -3674,6 +4230,11 @@ export function App({
           void importFiles(Array.from(event.dataTransfer.files));
         }}
       >
+        <CanvasObjectNavigator
+          value={selectedCanvasObjectValue}
+          groups={canvasObjectGroups}
+          onChange={selectCanvasObject}
+        />
         <Stage
           ref={stageRef}
           width={size.width}
@@ -3765,11 +4326,20 @@ export function App({
                   else nodeRefs.current.delete(node.id);
                 }}
                 onSelect={() => {
+                  if (selectedNodeIds.includes(node.id)) {
+                    setSelectedId(node.id);
+                    setSelectedAnnotationId(null);
+                    return;
+                  }
                   setSelectedId(node.id);
                   setSelectedNodeIds([node.id]);
                   setSelectedAnnotationId(null);
                   setSelectedTextCardId(null);
+                  setSelectedTextCardIds([]);
                 }}
+                onMoveStart={() => beginCanvasGroupMove("image", node.id)}
+                onMove={(x, y) => moveCanvasGroup("image", node.id, x, y)}
+                onMoveEnd={endCanvasGroupMove}
                 onManipulationStart={() => setManipulatingNodeId(node.id)}
                 onManipulationEnd={() => setManipulatingNodeId(null)}
                 onChange={updateNode}
@@ -3787,7 +4357,10 @@ export function App({
                 }}
                 onSelect={() => {
                   setSelectedAnnotationId(annotation.id);
+                  setSelectedId(null);
+                  setSelectedNodeIds([]);
                   setSelectedTextCardId(null);
+                  setSelectedTextCardIds([]);
                 }}
                 onEdit={() => editTextAnnotation(annotation)}
                 onChange={updateAnnotation}
@@ -3876,18 +4449,29 @@ export function App({
               key={card.id}
               card={card}
               viewport={viewport}
-              selected={selectedTextCardId === card.id}
+              selected={selectedTextCardIds.includes(card.id)}
+              saveState={saveState}
               onSelect={() => {
+                if (selectedTextCardIds.includes(card.id)) {
+                  setSelectedTextCardId(card.id);
+                  setSelectedAnnotationId(null);
+                  return;
+                }
                 setSelectedTextCardId(card.id);
+                setSelectedTextCardIds([card.id]);
                 setSelectedId(null);
                 setSelectedNodeIds([]);
                 setSelectedAnnotationId(null);
               }}
+              onMoveStart={() => beginCanvasGroupMove("text-card", card.id)}
+              onMove={(x, y) => moveCanvasGroup("text-card", card.id, x, y)}
+              onMoveEnd={endCanvasGroupMove}
               onChange={(patch) => updateTextCard(card.id, patch)}
               onCommit={commitTextCardChange}
               onUse={(text) => useTextCardForNextTask(card, text)}
-              onCopy={(text) => void copyTextCardContent(text)}
-              onSave={(text) => void saveTextCardToLibrary(card, text)}
+              onContinue={(text) => continueTextCardOptimization(card, text)}
+              onCopy={copyTextCardContent}
+              onSave={(text) => saveTextCardToLibrary(card, text)}
               onRemove={() => removeTextCard(card)}
             />
           ))}
@@ -3944,7 +4528,7 @@ export function App({
                   const stage = event.target.value as WorkflowStage;
                   updateSelectedNodeWorkflow(
                     { stage },
-                    `“${defaultViewpointName(selectedNode.name)}”已更新为${WORKFLOW_STAGE_LABELS[stage]}。`
+                    `“${viewpointNameFromFilename(selectedNode.name)}”已更新为${WORKFLOW_STAGE_LABELS[stage]}。`
                   );
                   setBulkStage(stage);
                   setWorkflowAction(defaultWorkflowAction(stage));
@@ -3968,11 +4552,11 @@ export function App({
                 onChange={(event) => event.target.value === "auto"
                   ? updateSelectedNodeWorkflow(
                       { statusMode: "auto" },
-                      `“${defaultViewpointName(selectedNode.name)}”已恢复自动判断状态。`
+                      `“${viewpointNameFromFilename(selectedNode.name)}”已恢复自动判断状态。`
                     )
                   : updateSelectedNodeWorkflow(
                       { statusMode: "manual", status: event.target.value as ViewpointStatus },
-                      `“${defaultViewpointName(selectedNode.name)}”已人工设置为${VIEWPOINT_STATUS_LABELS[event.target.value as ViewpointStatus]}。`
+                      `“${viewpointNameFromFilename(selectedNode.name)}”已人工设置为${VIEWPOINT_STATUS_LABELS[event.target.value as ViewpointStatus]}。`
                     )}
               >
                 <option value="" disabled>设置状态</option>
@@ -4021,6 +4605,250 @@ export function App({
               <span className="context-label">标记采用</span>
             </button>
           </div>
+        )}
+
+        {contextPanelPlacement && contextMode !== "hidden" && (
+          <aside
+            className="selection-context-workbench"
+            data-mode={contextMode}
+            data-placement={contextPanelPlacement.placement}
+            aria-label={contextMode === "single" ? "当前图片输入" : "批量发送设置"}
+            style={{
+              left: contextPanelPlacement.left,
+              top: contextPanelPlacement.top,
+              width: contextPanelPlacement.width
+            }}
+          >
+            <header className="selection-context-heading">
+              <span>
+                <small>{contextMode === "single" ? "IMAGE INPUT" : "BATCH INPUT"}</small>
+                <strong>{contextMode === "single"
+                  ? selectedBatchNodes[0]?.name ?? "当前图片"
+                  : `已选择 ${selectedBatchNodes.length} 张图片`}</strong>
+              </span>
+              <div>
+                <button
+                  type="button"
+                  aria-expanded={contextPromptOpen}
+                  data-active={contextPromptOpen}
+                  onClick={() => setContextPromptOpen((current) => !current)}
+                >提示词库 <small>{promptStatusLabel}</small></button>
+                <button
+                  type="button"
+                  aria-label="关闭当前图片输入"
+                  title="清空图片选择并关闭"
+                  onClick={() => {
+                    setSelectedId(null);
+                    setSelectedNodeIds([]);
+                    setContextPromptOpen(false);
+                  }}
+                >×</button>
+              </div>
+            </header>
+
+            <div className="selection-context-controls">
+              <label>
+                <span>{contextMode === "single" ? "图片阶段" : "统一阶段"}</span>
+                <select
+                  value={bulkStage}
+                  onChange={(event) => changeBulkStage(event.target.value as WorkflowStage)}
+                >
+                  {USER_WORKFLOW_STAGES.map((stage) => (
+                    <option key={stage} value={stage}>{WORKFLOW_STAGE_LABELS[stage]}</option>
+                  ))}
+                </select>
+              </label>
+              <div className="context-action-selector" role="radiogroup" aria-label="本轮GPT动作">
+                {WORKFLOW_STAGE_ACTIONS[bulkStage].map((action) => (
+                  <button
+                    key={action}
+                    type="button"
+                    role="radio"
+                    aria-checked={workflowAction === action}
+                    data-active={workflowAction === action}
+                    onClick={() => setWorkflowAction(action)}
+                  >{WORKFLOW_ACTION_LABELS[action]}</button>
+                ))}
+              </div>
+            </div>
+
+            <details className="context-generation-target">
+              <summary>
+                <span>生成目标</span>
+                <strong>{customGptEnabled ? "专属 GPT" : "普通 GPT"}</strong>
+              </summary>
+              <div>
+                <div className="gpt-target-mode" role="radiogroup" aria-label="GPT目标类型">
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={!customGptEnabled}
+                    data-active={!customGptEnabled}
+                    onClick={() => {
+                      setCustomGptEnabled(false);
+                      setEditingCustomGptTarget(false);
+                      setRevision((current) => current + 1);
+                    }}
+                  >普通 GPT</button>
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={customGptEnabled}
+                    data-active={customGptEnabled}
+                    onClick={() => {
+                      setCustomGptEnabled(true);
+                      if (!normalizedCustomGptUrl) setEditingCustomGptTarget(true);
+                    }}
+                  >专属 GPT</button>
+                </div>
+                {customGptEnabled && (
+                  <div className="context-target-editor">
+                    <input
+                      type="url"
+                      aria-label="专属 GPT 首页地址"
+                      value={customGptDraft}
+                      placeholder="https://chatgpt.com/g/g-…"
+                      onChange={(event) => setCustomGptDraft(event.target.value.slice(0, 500))}
+                    />
+                    <button type="button" onClick={commitCustomGptTarget}>保存</button>
+                  </div>
+                )}
+              </div>
+            </details>
+
+            {contextMode === "batch" && bulkStage === "preflight" && (
+              <details className="context-su-pairing">
+                <summary>配对 SU 截图（可选）<span>{pairedSuCount}/{selectedBatchNodes.length}</span></summary>
+                <div>
+                  {selectedBatchNodes.map((source) => (
+                    <label key={source.versionId}>
+                      <span title={source.name}>{source.name}</span>
+                      <select
+                        value={preflightPairVersionIds[source.versionId] ?? ""}
+                        onChange={(event) => setPreflightPairVersionIds((current) => ({
+                          ...current,
+                          [source.versionId]: event.target.value as `version_${string}` | ""
+                        }))}
+                      >
+                        <option value="">不配对</option>
+                        {nodes.filter((candidate) => candidate.versionId !== source.versionId).map((candidate) => (
+                          <option key={candidate.versionId} value={candidate.versionId}>{candidate.name}</option>
+                        ))}
+                      </select>
+                    </label>
+                  ))}
+                </div>
+              </details>
+            )}
+
+            {contextPromptOpen && (
+              <section className="context-prompt-library" aria-label="跟随当前图片的提示词库">
+                <label>
+                  <span>查找提示词</span>
+                  <input
+                    type="search"
+                    value={promptSearch}
+                    placeholder="搜索编号、名称或内容"
+                    onChange={(event) => setPromptSearch(event.target.value.slice(0, 80))}
+                  />
+                </label>
+                <div className="context-prompt-list">
+                  {filteredFixedPrompts.map((prompt) => (
+                    <article key={prompt.id}>
+                      <span><small>工作流预设</small><strong>{prompt.title}</strong></span>
+                      <div>
+                        <button type="button" onClick={() => applyFixedWorkflowPrompt(prompt.id, "replace")}>替换</button>
+                        <button type="button" onClick={() => applyFixedWorkflowPrompt(prompt.id, "append")}>追加</button>
+                      </div>
+                    </article>
+                  ))}
+                  {filteredProjectPrompts.map((prompt) => (
+                    <article key={prompt.id}>
+                      <span><small>当前项目</small><strong>{prompt.title}</strong></span>
+                      <div>
+                        <button type="button" onClick={() => applyPromptTemplate(prompt.id, "replace")}>替换</button>
+                        <button type="button" onClick={() => applyPromptTemplate(prompt.id, "append")}>追加</button>
+                      </div>
+                    </article>
+                  ))}
+                  {!filteredFixedPrompts.length && !filteredProjectPrompts.length && <p>没有匹配的提示词。</p>}
+                </div>
+              </section>
+            )}
+
+            <label className="selection-context-input">
+              <span>{contextMode === "single" ? "本轮输入" : "统一任务要求"}</span>
+              <textarea
+                ref={taskInstructionRef}
+                id="main-task-instruction"
+                value={taskInstruction}
+                rows={contextMode === "single" ? 4 : 3}
+                maxLength={12000}
+                placeholder={contextMode === "single"
+                  ? "输入这张图片需要分析、生成或优化的内容。"
+                  : "对所选图片统一生效；每张图片仍会建立独立任务和结果。"}
+                onChange={(event) => {
+                  setTaskInstruction(event.target.value);
+                  setRevision((current) => current + 1);
+                }}
+              />
+            </label>
+
+            <footer className="selection-context-footer">
+              <span>
+                <small>{contextMode === "single"
+                  ? `${singleTaskSource?.sourceWidth ?? 0} × ${singleTaskSource?.sourceHeight ?? 0} px`
+                  : `${selectedBatchNodes.length} 张 · 严格串行`}</small>
+                <strong>{generationActive && generationTask
+                  ? TASK_STATUS_LABELS[generationTask.status]
+                  : contextMode === "single"
+                    ? taskPreview.ready ? previewStatusLabel : `待补 ${taskPreview.missing.length} 项`
+                    : STAGE_SELECTION_HINTS[bulkStage]}</strong>
+              </span>
+              <div>
+                {contextMode === "batch" && (
+                  <button type="button" onClick={applyBulkStage}>只更新阶段</button>
+                )}
+                {generationActive && generationTask ? (
+                  <button
+                    type="button"
+                    className="context-danger-action"
+                    disabled={cancellingTask}
+                    onClick={() => void cancelActiveTask()}
+                  >{cancellingTask ? "正在结束…" : "结束任务"}</button>
+                ) : contextMode === "batch" ? (
+                  <button
+                    type="button"
+                    className="context-primary-action"
+                    disabled={
+                      !generationTargetReady
+                      || !automationReady
+                      || creatingTask
+                      || returningResults
+                      || generationResultsPending
+                      || bulkStage === "completed"
+                      || Boolean(batchRun && batchRun.status !== "completed")
+                    }
+                    onClick={sendSelectionToGpt}
+                  >{creatingTask ? "正在建立…" : `批量发送 ${selectedBatchNodes.length} 张`}</button>
+                ) : (
+                  <button
+                    type="button"
+                    className="context-primary-action"
+                    disabled={
+                      !taskPreview.ready
+                      || !generationTargetReady
+                      || !automationReady
+                      || creatingTask
+                      || generationResultsPending
+                      || returningResults
+                    }
+                    onClick={() => void createTask()}
+                  >{creatingTask ? "正在创建…" : WORKFLOW_ACTION_LABELS[workflowAction]}</button>
+                )}
+              </div>
+            </footer>
+          </aside>
         )}
 
         {textEditor && textEditorPosition && (
@@ -4082,8 +4910,11 @@ export function App({
       <aside
         ref={inspectorRef}
         className="inspector"
-        aria-label="属性与任务"
+        aria-label="任务预检与最终导出"
         data-resizing={resizingWorkbench || undefined}
+        data-has-selection={selectedBatchNodes.length > 0 || undefined}
+        data-panel-open={Boolean(workbenchPanel) || undefined}
+        data-active-panel={workbenchPanel ?? "none"}
         style={({
           ...(workbenchHeight ? { "--workbench-height": `${workbenchHeight}px` } : {}),
           ...(workbenchWidth ? { "--workbench-width": `${workbenchWidth}px` } : {})
@@ -4091,6 +4922,7 @@ export function App({
       >
         <div
           className="workbench-resize-handle"
+          hidden
           role="separator"
           aria-label="拖动调节输入提示词面板高度"
           aria-orientation="horizontal"
@@ -4099,7 +4931,7 @@ export function App({
           aria-valuenow={workbenchHeight ?? undefined}
           aria-valuetext={workbenchHeight ? `${workbenchHeight} 像素` : "自动高度"}
           tabIndex={0}
-          title="悬停展开；上下拖动调节高度；按 Home 恢复自动高度"
+          title="展开工作台；上下拖动调节高度；按 Home 恢复自动高度"
           onPointerDown={beginWorkbenchResize}
           onKeyDown={resizeWorkbenchFromKeyboard}
           onDoubleClick={() => {
@@ -4112,12 +4944,13 @@ export function App({
           }}
         >
           <span aria-hidden="true" />
-          <small>悬停展开 · 拖动调节</small>
+          <small>{selectedBatchNodes.length ? `${selectedBatchNodes.length}张已选 · 展开工作台` : "展开工作台 · 拖动调节"}</small>
         </div>
         {(["left", "right"] as const).map((side) => (
           <div
             key={side}
             className={`workbench-width-handle workbench-width-handle-${side}`}
+            hidden
             role="separator"
             aria-label={`拖动${side === "left" ? "左" : "右"}边框调节输入提示词面板宽度`}
             aria-orientation="vertical"
@@ -4174,9 +5007,15 @@ export function App({
                 </select>
               </label>
               {bulkStage === "preflight" && (
-                <div className="preflight-pairing-list" aria-label="D5与SU一对一配对">
-                  <strong>D5／SU 配对（SU可选）</strong>
-                  <small>框选项均作为独立D5视角；SU截图请在对应行选择，不要把SU截图加入框选。</small>
+                <details className="preflight-pairing-list" aria-label="D5与SU一对一配对">
+                  <summary>
+                    <span>
+                      <strong>配对 SU 模型截图</strong>
+                      <small>可选 · 仅用于检查当前 D5 视角中的可见建模细节</small>
+                    </span>
+                    <em>{pairedSuCount ? `${pairedSuCount}/${selectedBatchNodes.length} 已配对` : "按需展开"}</em>
+                  </summary>
+                  <p>D5 图决定相机与构图；SU 图只核对窗框、檐口、入口、接地等可见细节。不要把 SU 图加入主框选。</p>
                   {selectedBatchNodes.map((source) => (
                     <label key={source.versionId}>
                       <span>{source.name}</span>
@@ -4187,14 +5026,14 @@ export function App({
                           [source.versionId]: event.target.value as `version_${string}` | ""
                         }))}
                       >
-                        <option value="">无SU截图，仅审查可见画面</option>
+                        <option value="">不配对，仅审查 D5 可见画面</option>
                         {nodes.filter((candidate) => candidate.versionId !== source.versionId).map((candidate) => (
                           <option key={candidate.versionId} value={candidate.versionId}>{candidate.name}</option>
                         ))}
                       </select>
                     </label>
                   ))}
-                </div>
+                </details>
               )}
               <div className="workflow-action-selector" role="radiogroup" aria-label="本轮GPT动作">
                 {WORKFLOW_STAGE_ACTIONS[bulkStage].map((action) => (
@@ -4479,29 +5318,31 @@ export function App({
         <div className="generation-workbench">
           <header className="generation-workbench-heading">
             <span className="workbench-input-title">
-              <small>INPUT</small>
-              <strong>输入提示词</strong>
+              <small>UTILITY</small>
+              <strong>项目工具</strong>
             </span>
-            <nav aria-label="输入提示词附属工具">
+            <nav aria-label="工作台工具">
               <button
                 type="button"
+                hidden
                 aria-expanded={workbenchPanel === "batch"}
                 data-active={workbenchPanel === "batch"}
                 onClick={() => setWorkbenchPanel((current) => current === "batch" ? null : "batch")}
               >
                 <b aria-hidden="true">⇢</b>
-                <span>发送队列</span>
-                <small>{batchRun ? `${currentBatchProgress.completed}/${currentBatchProgress.total}` : batchSourceVersionIds.length}</small>
+                <span>批量发送</span>
+                <small>{batchStatusLabel}</small>
               </button>
               <button
                 type="button"
+                hidden
                 aria-expanded={workbenchPanel === "prompts"}
                 data-active={workbenchPanel === "prompts"}
                 onClick={() => setWorkbenchPanel((current) => current === "prompts" ? null : "prompts")}
               >
                 <b aria-hidden="true">T</b>
-                <span>项目提示词</span>
-                <small>{FIXED_WORKFLOW_PROMPTS.length + promptLibrary.length}</small>
+                <span>提示词库</span>
+                <small>{promptStatusLabel}</small>
               </button>
               <button
                 type="button"
@@ -4510,8 +5351,8 @@ export function App({
                 onClick={() => setWorkbenchPanel((current) => current === "preview" ? null : "preview")}
               >
                 <b aria-hidden="true">⌕</b>
-                <span>任务预览</span>
-                <small>{taskPreview.ready ? "就绪" : taskPreview.missing.length}</small>
+                <span>任务预检</span>
+                <small>{previewStatusLabel}</small>
               </button>
               <button
                 type="button"
@@ -4521,7 +5362,7 @@ export function App({
               >
                 <b aria-hidden="true">✓</b>
                 <span>最终导出</span>
-                <small>{deliveryTarget ? "已配置" : "待配置"}</small>
+                <small>{deliveryStatusLabel}</small>
               </button>
             </nav>
           </header>
@@ -4530,14 +5371,49 @@ export function App({
           <div className="task-heading">
             <div>
               <p className="section-kicker">SEND &amp; BATCH</p>
-              <h3>{selectedBatchNodes.length > 1 && !batchRun ? "发送与批量处理" : "发送队列"}</h3>
+              <h3>{batchRun ? "发送队列" : "批量发送"}</h3>
             </div>
             <span>{selectedBatchNodes.length > 1 && !batchRun
               ? `${selectedBatchNodes.length} 张已框选`
               : batchRun
               ? `${currentBatchProgress.completed + currentBatchProgress.failed} / ${currentBatchProgress.total}`
-              : `${batchSourceVersionIds.length} 张待建队列`}</span>
+              : batchStatusLabel}</span>
           </div>
+
+          {!batchRun && selectedBatchNodes.length > 0 && (
+            <section className="batch-selection-summary" aria-label="本次发送图片">
+              <header>
+                <span>
+                  <strong>发送内容</strong>
+                  <small>{selectedBatchNodes.length} 张图片将按画布顺序独立处理</small>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedNodeIds([]);
+                    setSelectedId(null);
+                  }}
+                >清空选择</button>
+              </header>
+              <ul>
+                {selectedBatchNodes.slice(0, 4).map((node) => (
+                  <li key={node.id} title={node.name}>
+                    <img src={node.src} alt="" />
+                    <span>{node.name}</span>
+                    <button
+                      type="button"
+                      aria-label={`移除 ${node.name}`}
+                      onClick={() => {
+                        setSelectedNodeIds((current) => current.filter((id) => id !== node.id));
+                        setSelectedId((current) => current === node.id ? null : current);
+                      }}
+                    >×</button>
+                  </li>
+                ))}
+                {selectedBatchNodes.length > 4 && <li className="batch-selection-more">另有 {selectedBatchNodes.length - 4} 张</li>}
+              </ul>
+            </section>
+          )}
 
           <div
             className="dedicated-gpt-target"
@@ -4703,7 +5579,10 @@ export function App({
             </>
           ) : selectedBatchNodes.length > 0 ? (
             <div className="drawer-selection-batch">
-              <p>画布已选中 {selectedBatchNodes.length} 张图片，可按阶段规则组合后发送。</p>
+              <p className="batch-step-label">
+                <strong>任务规则</strong>
+                <span>设置一次，系统会为每张图片建立独立串行任务。</span>
+              </p>
               <label>
                 <span>统一阶段</span>
                 <select value={bulkStage} onChange={(event) => changeBulkStage(event.target.value as WorkflowStage)}>
@@ -4713,9 +5592,15 @@ export function App({
                 </select>
               </label>
               {bulkStage === "preflight" && (
-                <div className="preflight-pairing-list" aria-label="D5与SU一对一配对">
-                  <strong>D5／SU 配对（SU可选）</strong>
-                  <small>框选项均作为独立D5视角；SU截图请在对应行选择。</small>
+                <details className="preflight-pairing-list" aria-label="D5与SU一对一配对">
+                  <summary>
+                    <span>
+                      <strong>配对 SU 模型截图</strong>
+                      <small>可选 · 仅用于检查当前 D5 视角中的可见建模细节</small>
+                    </span>
+                    <em>{pairedSuCount ? `${pairedSuCount}/${selectedBatchNodes.length} 已配对` : "按需展开"}</em>
+                  </summary>
+                  <p>D5 图决定相机与构图；SU 图只核对窗框、檐口、入口、接地等可见细节。每张 D5 最多配对一张同方向 SU 图。</p>
                   {selectedBatchNodes.map((source) => (
                     <label key={source.versionId}>
                       <span>{source.name}</span>
@@ -4726,14 +5611,14 @@ export function App({
                           [source.versionId]: event.target.value as `version_${string}` | ""
                         }))}
                       >
-                        <option value="">无SU截图，仅审查可见画面</option>
+                        <option value="">不配对，仅审查 D5 可见画面</option>
                         {nodes.filter((candidate) => candidate.versionId !== source.versionId).map((candidate) => (
                           <option key={candidate.versionId} value={candidate.versionId}>{candidate.name}</option>
                         ))}
                       </select>
                     </label>
                   ))}
-                </div>
+                </details>
               )}
               <div className="workflow-action-selector" role="radiogroup" aria-label="本轮GPT动作">
                 {WORKFLOW_STAGE_ACTIONS[bulkStage].map((action) => (
@@ -4743,15 +5628,15 @@ export function App({
                 ))}
               </div>
               <div>
-                <button type="button" onClick={applyBulkStage}>仅更新阶段</button>
+                <button type="button" onClick={applyBulkStage}>只更新阶段</button>
                 <button
                   type="button"
                   className="task-create"
                   disabled={!generationTargetReady || !automationReady || creatingTask || returningResults || bulkStage === "completed"}
                   onClick={sendSelectionToGpt}
-                >{`组合并发送到${activeTargetChatUrl ? "专属" : "普通"} GPT`}</button>
+                >{`发送 ${selectedBatchNodes.length} 张图片到${activeTargetChatUrl ? "专属" : "普通"} GPT`}</button>
               </div>
-              <small>{STAGE_SELECTION_HINTS[bulkStage]}</small>
+              <small>{STAGE_SELECTION_HINTS[bulkStage]} 下方输入内容作为本轮补充要求，可留空使用阶段预设。</small>
             </div>
           ) : (
             <>
@@ -4792,83 +5677,150 @@ export function App({
           <div className="task-heading">
             <div>
               <p className="section-kicker">PROMPT LIBRARY</p>
-              <h3>项目提示词</h3>
+              <h3>提示词库</h3>
             </div>
-            <span>{FIXED_WORKFLOW_PROMPTS.length + promptLibrary.length} 条</span>
+            <span>{promptStatusLabel}</span>
           </div>
 
-          <div className="prompt-library">
-            <select
-              className="project-prompt-select"
-              aria-label="选择项目提示词"
-              value={selectedFixedPromptId
-                ? `fixed:${selectedFixedPromptId}`
-                : selectedPromptId
-                  ? `project:${selectedPromptId}`
-                  : ""}
-              onChange={(event) => {
-                const [kind, id] = event.target.value.split(":", 2);
-                if (!id) return;
-                if (kind === "fixed") applyFixedWorkflowPrompt(id);
-                if (kind === "project") applyPromptTemplate(id);
-              }}
-            >
-              <option value="" disabled>选择项目提示词</option>
-              <optgroup label="工作流预设">
-                {FIXED_WORKFLOW_PROMPTS.map((prompt) => (
-                  <option key={prompt.id} value={`fixed:${prompt.id}`}>{prompt.title}</option>
+          <div className="prompt-library-browser">
+            <label className="prompt-library-search">
+              <span>查找提示词</span>
+              <input
+                type="search"
+                value={promptSearch}
+                placeholder="搜索编号、名称或内容"
+                onChange={(event) => setPromptSearch(event.target.value.slice(0, 80))}
+              />
+            </label>
+
+            {selectedPromptTemplate && (
+              <section className="prompt-selection-preview" aria-label="已选提示词">
+                <header>
+                  <span><small>已选提示词</small><strong>{selectedPromptTemplate.title}</strong></span>
+                  <em>{selectedFixedPromptId ? "工作流预设" : "当前项目"}</em>
+                </header>
+                <p>{"summary" in selectedPromptTemplate ? selectedPromptTemplate.summary : selectedPromptTemplate.content.slice(0, 120)}</p>
+                <details>
+                  <summary>预览完整内容</summary>
+                  <pre>{selectedPromptTemplate.content}</pre>
+                </details>
+                <div className="prompt-apply-actions">
+                  <button type="button" onClick={() => applySelectedPrompt("replace")}>替换当前输入</button>
+                  <button type="button" disabled={!taskInstruction.trim()} onClick={() => applySelectedPrompt("append")}>追加到当前输入</button>
+                </div>
+                {taskInstruction.trim() && <small>“替换”会覆盖当前输入；“追加”会保留现有内容并另起一段。</small>}
+              </section>
+            )}
+
+            <section className="prompt-library-group" aria-label="工作流预设">
+              <header><strong>工作流预设</strong><span>{filteredFixedPrompts.length} 条</span></header>
+              <div className="fixed-prompt-list">
+                {filteredFixedPrompts.map((prompt) => (
+                  <article key={prompt.id} data-selected={selectedFixedPromptId === prompt.id}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedFixedPromptId(prompt.id);
+                        setSelectedPromptId("");
+                        setPromptDeleteConfirmId("");
+                        setPromptTitle(prompt.title);
+                      }}
+                    >
+                      <b>{prompt.title.includes("｜") ? prompt.title.split("｜")[0] : "预设"}</b>
+                      <span><strong>{prompt.title}</strong><small>{prompt.summary}</small></span>
+                      <i>{selectedFixedPromptId === prompt.id ? "已选" : "选择"}</i>
+                    </button>
+                  </article>
                 ))}
-              </optgroup>
-              <optgroup label="项目保存">
-                {promptLibrary.length ? promptLibrary.map((item) => (
-                  <option key={item.id} value={`project:${item.id}`}>{item.title}</option>
-                )) : <option disabled>暂无项目保存提示词</option>}
-              </optgroup>
-            </select>
-            <small className="project-prompt-help">
-              工作流预设作为下拉选项套用；保存后成为当前项目的自定义提示词。
-            </small>
-            <input
-              aria-label="提示词名称"
-              value={promptTitle}
-              maxLength={40}
-              placeholder="提示词名称"
-              onChange={(event) => setPromptTitle(event.target.value)}
-            />
-            <div className="prompt-library-actions">
-              <button
-                type="button"
-                disabled={!promptTitle.trim() || !taskInstruction.trim() || savingPrompt}
-                onClick={() => void saveCurrentPrompt()}
-              >
-                {savingPrompt ? "保存中…" : selectedPromptId ? "更新" : "保存"}
-              </button>
-              <button
-                type="button"
-                disabled={!selectedPromptId || savingPrompt}
-                onClick={() => void deleteCurrentPrompt()}
-              >
-                删除
-              </button>
-            </div>
+                {!filteredFixedPrompts.length && <p className="prompt-library-empty">没有匹配的工作流预设。</p>}
+              </div>
+            </section>
+
+            <section className="prompt-library-group" aria-label="当前项目提示词">
+              <header><strong>当前项目</strong><span>{filteredProjectPrompts.length} 条</span></header>
+              <div className="fixed-prompt-list project-prompt-list">
+                {filteredProjectPrompts.map((prompt) => (
+                  <article key={prompt.id} data-selected={selectedPromptId === prompt.id}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedPromptId(prompt.id);
+                        setSelectedFixedPromptId("");
+                        setPromptDeleteConfirmId("");
+                        setPromptTitle(prompt.title);
+                      }}
+                    >
+                      <b>项目</b>
+                      <span><strong>{prompt.title}</strong><small>{prompt.content.slice(0, 72) || "空提示词"}</small></span>
+                      <i>{selectedPromptId === prompt.id ? "已选" : "选择"}</i>
+                    </button>
+                  </article>
+                ))}
+                {!filteredProjectPrompts.length && (
+                  <p className="prompt-library-empty">{promptLibrary.length ? "没有匹配的项目提示词。" : "当前项目还没有保存提示词。"}</p>
+                )}
+              </div>
+            </section>
+
+            <details className="prompt-save-panel">
+              <summary>保存当前输入到项目</summary>
+              <label>
+                <span>提示词名称</span>
+                <input
+                  value={promptTitle}
+                  maxLength={40}
+                  placeholder="例如：主入口夜景优化"
+                  onChange={(event) => setPromptTitle(event.target.value)}
+                />
+              </label>
+              <div className="prompt-library-actions">
+                {selectedPromptId && (
+                  <button
+                    type="button"
+                    disabled={!promptTitle.trim() || !taskInstruction.trim() || savingPrompt}
+                    onClick={() => void saveCurrentPrompt(false)}
+                  >{savingPrompt ? "保存中…" : "更新已选"}</button>
+                )}
+                <button
+                  type="button"
+                  disabled={!promptTitle.trim() || !taskInstruction.trim() || savingPrompt}
+                  onClick={() => void saveCurrentPrompt(true)}
+                >{savingPrompt ? "保存中…" : "另存新提示词"}</button>
+                {selectedPromptId && (
+                  <button
+                    type="button"
+                    className="prompt-delete"
+                    disabled={savingPrompt}
+                    onClick={() => setPromptDeleteConfirmId(selectedPromptId)}
+                  >移除已选</button>
+                )}
+              </div>
+              {promptDeleteConfirmId === selectedPromptId && selectedPromptId && (
+                <div className="prompt-delete-confirm" role="alert">
+                  <span>移除“{promptTitle || "未命名提示词"}”？当前输入内容不会被清空。</span>
+                  <button type="button" onClick={() => setPromptDeleteConfirmId("")}>取消</button>
+                  <button type="button" className="confirm-delete" onClick={() => void deleteCurrentPrompt()}>确认移除</button>
+                </div>
+              )}
+            </details>
           </div>
         </section>
 
         <section className="task-section compact-section" data-ready={taskPreview.ready}>
           <div className="task-heading">
             <div>
-              <p className="section-kicker">TASK PREVIEW</p>
-              <h3>任务预览</h3>
+              <p className="section-kicker">TASK PREFLIGHT</p>
+              <h3>任务预检</h3>
             </div>
             <span>{generationActive && generationTask
               ? TASK_STATUS_LABELS[generationTask.status]
-              : taskPreview.ready ? "就绪" : "待补"}</span>
+              : previewStatusLabel}</span>
           </div>
 
           <div className="generation-provider generation-provider-static">
-            <span>生成来源</span>
-            <strong>GPT 主流程</strong>
-            <small>Flow 已冻结，不参与当前任务</small>
+            <span>执行通道</span>
+            <strong>{activeTargetChatUrl ? "专属 GPT" : "普通 GPT"}</strong>
+            <small>严格串行 · 每张图独立留痕 · Flow 不参与</small>
           </div>
 
           <div className="workflow-action-selector workflow-action-selector-wide" role="radiogroup" aria-label="GPT任务动作">
@@ -4910,6 +5862,21 @@ export function App({
             </button>
           </div>
 
+          {generationMode === "concept-generation" && (
+            <label className="drawer-concept-input">
+              <span>文生图／分析图输入</span>
+              <textarea
+                ref={conceptInstructionRef}
+                value={taskInstruction}
+                rows={6}
+                maxLength={12000}
+                placeholder="输入本轮需要生成的内容；项目背景会按当前任务规则自动组合。"
+                onChange={(event) => setTaskInstruction(event.target.value)}
+              />
+              <small>{taskInstruction.length.toLocaleString("zh-CN")} / 12,000</small>
+            </label>
+          )}
+
           {projectRequirements && (
             <div
               className="project-context-status"
@@ -4926,7 +5893,7 @@ export function App({
             </div>
           )}
 
-          {structureBase && (
+          {singleTaskSource && (
             <p
               className="annotation-attachment-state"
               data-ready={structureAnnotations.length > 0}
@@ -4972,15 +5939,65 @@ export function App({
             </section>
           )}
 
-          {taskPreview.missing.length > 0 && (
-            <p className="task-missing">待补：{taskPreview.missing.map((item) => item === "修改要求" ? "提示词" : item).join("、")}</p>
-          )}
+          <section className="task-preflight-checklist" aria-label="发送前检查">
+            <header>
+              <span><strong>发送前检查</strong><small>缺失项可以直接跳转处理</small></span>
+              <em data-ready={taskPreview.ready}>{previewStatusLabel}</em>
+            </header>
+            <ul>
+              <li data-ready={generationTargetReady}>
+                <b aria-hidden="true">{generationTargetReady ? "✓" : "!"}</b>
+                <span><strong>发送目标</strong><small>{generationTargetReady ? `${activeTargetChatUrl ? "专属" : "普通"} GPT 已就绪` : "专属 GPT 地址尚未配置"}</small></span>
+                {!generationTargetReady && <button type="button" onClick={() => {
+                  setWorkbenchPanel(null);
+                  setNotice("请在当前图片输入面板中展开“生成目标”并补充专属 GPT 地址。");
+                }}>配置目标</button>}
+              </li>
+              <li data-ready={generationMode === "concept-generation" || Boolean(singleTaskSource)}>
+                <b aria-hidden="true">{generationMode === "concept-generation" || singleTaskSource ? "✓" : "!"}</b>
+                <span>
+                  <strong>结构依据</strong>
+                  <small>{generationMode === "concept-generation" ? "文生图模式可不附结构图" : singleTaskSource ? singleTaskSource.name : "尚未选择输入图片"}</small>
+                </span>
+                {generationMode === "reference-edit" && !singleTaskSource && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setWorkbenchPanel(null);
+                      setNotice("请在画布选择一张图片；输入面板会跟随所选图片出现。");
+                    }}
+                  >回到画布选择</button>
+                )}
+              </li>
+              <li data-ready={Boolean(taskInstruction.trim())}>
+                <b aria-hidden="true">{taskInstruction.trim() ? "✓" : "!"}</b>
+                <span><strong>补充要求</strong><small>{taskInstruction.trim() ? `${taskInstruction.trim().length.toLocaleString("zh-CN")} 字，将与阶段规则组合` : "尚未填写本轮提示词"}</small></span>
+                {!taskInstruction.trim() && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (generationMode === "concept-generation") {
+                        window.requestAnimationFrame(() => conceptInstructionRef.current?.focus());
+                      } else {
+                        setWorkbenchPanel(null);
+                        window.requestAnimationFrame(() => taskInstructionRef.current?.focus());
+                      }
+                    }}
+                  >填写提示词</button>
+                )}
+              </li>
+              <li data-ready="true">
+                <b aria-hidden="true">✓</b>
+                <span><strong>输出类型</strong><small>{WORKFLOW_ACTION_LABELS[workflowAction]} · {workflowAction === "generate" ? "返回完整图片" : "返回可编辑文字卡"}</small></span>
+              </li>
+            </ul>
+          </section>
           <details className="prompt-preview">
             <summary>
-              查看最终提示词
+              {taskPreview.prompt ? "预览最终提示词" : "最终提示词尚未生成"}
               <small>{taskPreview.prompt.length.toLocaleString("zh-CN")} 字</small>
             </summary>
-            <pre>{taskPreview.prompt || "指定结构基准并填写修改要求后生成预览。"}</pre>
+            <pre>{taskPreview.prompt || "补齐上方缺失项后，系统会在这里生成最终提示词。"}</pre>
           </details>
 
         </section>
@@ -5050,9 +6067,8 @@ export function App({
         </section>
 
           </div>
-          <section className="instruction-composer" aria-label="输入提示词">
+          <section className="instruction-composer legacy-instruction-composer" aria-label="旧版输入提示词" hidden>
             <textarea
-              id="main-task-instruction"
               value={taskInstruction}
               rows={10}
               maxLength={12000}

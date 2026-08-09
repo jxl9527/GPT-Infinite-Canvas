@@ -9,7 +9,9 @@ import {
   coverCropForRenderedImage,
   fitImportedImage,
   normalizeImageFrames,
+  nextChildBoundsToRight,
   placeChildToRight,
+  placeChildToRightStacked,
   placeImageContextToolbar,
   removeImageNode,
   type ImageNodeState
@@ -131,6 +133,31 @@ test("生成结果固定放到父节点右侧并记录父版本", () => {
   assert.equal(child.taskId, "task_demo");
 });
 
+test("同源生成结果在父图右侧纵向排队且不覆盖已有结果", () => {
+  const parent = { ...baseNode, x: 180, y: 120, width: 640, height: 360 };
+  const first = placeChildToRightStacked(parent, {
+    ...baseNode,
+    id: "node_first",
+    versionId: "version_first",
+    origin: "generated",
+    taskId: "task_first"
+  });
+  const second = placeChildToRightStacked(parent, {
+    ...baseNode,
+    id: "node_second",
+    versionId: "version_second",
+    origin: "generated",
+    taskId: "task_second"
+  }, [first]);
+  assert.deepEqual({ x: first.x, y: first.y }, { x: 916, y: 120 });
+  assert.deepEqual({ x: second.x, y: second.y }, { x: 916, y: 528 });
+  assert.ok(first.y + first.height < second.y);
+  assert.deepEqual(
+    nextChildBoundsToRight(parent, parent, [first, second]),
+    { x: 916, y: 936, width: 640, height: 360 }
+  );
+});
+
 test("纵向排布使用每张图片实际高度推进且不会重叠", () => {
   const first = { ...baseNode, id: "node_first" as const, width: 640, height: 320 };
   const second = { ...baseNode, id: "node_second" as const, width: 480, height: 440 };
@@ -175,6 +202,19 @@ test("图片贴近画布顶部时工具栏移到下方，图片不可见时不�
     ),
     null
   );
+});
+
+test("窄窗口图片工具栏避开左侧固定工具轨", () => {
+  const placement = placeImageContextToolbar(
+    { x: 0, y: 200, width: 640, height: 360 },
+    { x: 0, y: 0, scale: 1 },
+    { width: 720, height: 600 },
+    { minWidth: 620, maxWidth: 760, height: 62, leftInset: 76 }
+  );
+  assert.equal(placement?.left, 76);
+  assert.equal(placement?.width, 632);
+  assert.ok((placement?.left ?? 0) >= 76);
+  assert.ok((placement?.left ?? 0) + (placement?.width ?? 0) <= 708);
 });
 
 test("父子图片上下排布时连线从下边指向上边", () => {

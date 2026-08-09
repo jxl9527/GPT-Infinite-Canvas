@@ -6,6 +6,7 @@ namespace GPTCanvasContent {
     send: "button[data-testid='send-button'], button[aria-label*='Send'], button[aria-label*='发送']",
     stop: "button[data-testid='stop-button'], button[aria-label*='Stop'], button[aria-label*='停止']",
     assistantTurn: "section[data-testid^='conversation-turn-'], article[data-testid^='conversation-turn-']",
+    assistantComplete: "button[data-testid='copy-turn-action-button'], button[data-testid$='turn-action-button'], button[aria-label='Copy'], button[aria-label='复制']",
     images: "img[src]"
   });
 
@@ -57,6 +58,11 @@ namespace GPTCanvasContent {
     sendButton(): HTMLButtonElement | null { return this.root.querySelector<HTMLButtonElement>(SELECTORS.send); }
     isSendReady(): boolean { const button = this.sendButton(); return Boolean(button && !button.disabled); }
     isGenerating(): boolean { return Boolean(this.root.querySelector(SELECTORS.stop)); }
+    isResponseComplete(): boolean {
+      const turns = this.assistantTurns();
+      const latestTurn = turns[turns.length - 1];
+      return Boolean(latestTurn && !this.isGenerating() && latestTurn.querySelector(SELECTORS.assistantComplete));
+    }
 
     async waitForComposer(timeoutMs = 120_000): Promise<HTMLElement> {
       const deadline = Date.now() + timeoutMs;

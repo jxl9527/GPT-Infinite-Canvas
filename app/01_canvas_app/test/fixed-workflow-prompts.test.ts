@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   FIXED_WORKFLOW_PROMPTS,
   fixedWorkflowPromptById,
+  wrapPromptForAction,
   workflowStagePrompt
 } from "../src/fixed-workflow-prompts.js";
 
@@ -32,6 +33,22 @@ test("优化阶段提示词与目标图动作明确分离", () => {
   assert.match(promptOnly, /【最终生成提示词】/);
   assert.match(generate, /仅用于D5深化参考/);
   assert.match(generate, /不是结构依据或最终交付图/);
+});
+
+test("文字动作移除图片生成输出要求，生成动作保持原要求", () => {
+  const imagePrompt = [
+    "优化入口空间层次。",
+    "输出要求：请直接生成一张可回收到当前画布的高质量建筑方案图，保持原始画幅关系；不要只返回文字建议。"
+  ].join("\n");
+  const analyze = wrapPromptForAction("analyze", imagePrompt);
+  const promptOnly = wrapPromptForAction("prompt", imagePrompt);
+  const generate = wrapPromptForAction("generate", imagePrompt);
+
+  assert.match(analyze, /只分析图片并返回文字/);
+  assert.doesNotMatch(analyze, /请直接生成一张|不要只返回文字建议/);
+  assert.match(promptOnly, /只生成或优化提示词/);
+  assert.doesNotMatch(promptOnly, /请直接生成一张|不要只返回文字建议/);
+  assert.match(generate, /请直接生成一张/);
 });
 
 test("最终阶段整图玻璃模板保持结构和画幅边界", () => {

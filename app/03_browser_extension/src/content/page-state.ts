@@ -23,6 +23,7 @@ namespace GPTCanvasContent {
     sendButton(): HTMLButtonElement | null;
     isSendReady(): boolean;
     isGenerating(): boolean;
+    isResponseComplete?(): boolean;
     generationFailureReason?(): string | null;
     completedWithoutGeneratedImage?(): boolean;
     waitForComposer(timeoutMs?: number): Promise<HTMLElement>;
@@ -79,6 +80,33 @@ namespace GPTCanvasContent {
     if (mode !== "text" && imageCount > 0) return "image";
     if (mode !== "image" && textLength >= 20) return "text";
     return null;
+  }
+
+  const REQUIRED_TEXT_RESPONSE_SECTIONS = [
+    "【最终生成提示词】",
+    "【必须保持与禁止改变】",
+    "【唯一下一步】"
+  ] as const;
+
+  export function textResponseHasRequiredSections(prompt: string, response: string): boolean {
+    const required = REQUIRED_TEXT_RESPONSE_SECTIONS.filter((section) => prompt.includes(section));
+    return required.every((section) => (
+      response.includes(section)
+      || response.includes(section.slice(1, -1))
+    ));
+  }
+
+  export function textResponseReady(
+    prompt: string,
+    response: string,
+    generating: boolean,
+    completionSignal: boolean
+  ): boolean {
+    const normalized = response.trim();
+    return !generating
+      && completionSignal
+      && normalized.length >= 20
+      && textResponseHasRequiredSections(prompt, normalized);
   }
 
   export function containsSandboxImagePath(value: string): boolean {

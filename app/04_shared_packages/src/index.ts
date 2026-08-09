@@ -1,5 +1,6 @@
 export const SCHEMA_VERSION = "1.0" as const;
 export const MAX_VIEWPOINT_CONCLUSION_LENGTH = 1_000;
+export const MAX_VIEWPOINT_NAME_LENGTH = 40;
 
 export const WORKFLOW_STAGES_V3 = ["preflight", "scene-optimization", "final-glass", "completed"] as const;
 export type WorkflowStageV3 = (typeof WORKFLOW_STAGES_V3)[number];
