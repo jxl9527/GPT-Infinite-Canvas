@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-  [string]$ShortcutName = 'GPT 无限画布'
+  [string]$ShortcutName = 'GPT 无限画布',
+  [switch]$SkipCodexPlugin
 )
 
 $ErrorActionPreference = 'Stop'
@@ -34,7 +35,7 @@ $shortcut.TargetPath = Join-Path $env:SystemRoot 'System32\wscript.exe'
 $shortcut.Arguments = "//nologo `"$launcherPath`""
 $shortcut.WorkingDirectory = $scriptRoot
 $shortcut.IconLocation = "$iconPath,0"
-$shortcut.Description = 'GPT Infinite Canvas V3 0.4.0｜Chrome 启动器'
+$shortcut.Description = 'GPT Infinite Canvas 0.5.3｜浏览器人工批量／Codex 自动运行'
 $shortcut.Save()
 
 if (-not (Test-Path -LiteralPath $shortcutPath -PathType Leaf)) {
@@ -43,6 +44,16 @@ if (-not (Test-Path -LiteralPath $shortcutPath -PathType Leaf)) {
 
 & $serviceLauncherPath -SkipBrowser
 
-$logLine = '{0} version="0.4.0" installed="{1}" launcher="{2}"' -f (Get-Date -Format o), $shortcutPath, $launcherPath
+if (-not $SkipCodexPlugin) {
+  $pluginInstaller = Join-Path $scriptRoot 'Install-D5AICanvas-CodexPlugin.ps1'
+  if ((Test-Path -LiteralPath $pluginInstaller -PathType Leaf) -and (Get-Command codex -ErrorAction SilentlyContinue)) {
+    & $pluginInstaller
+  }
+  else {
+    Write-Warning '未检测到 Codex CLI 或插件安装脚本；浏览器人工批量可正常使用，稍后可单独安装 Codex 自动运行插件。'
+  }
+}
+
+$logLine = '{0} version="0.5.3" installed="{1}" launcher="{2}"' -f (Get-Date -Format o), $shortcutPath, $launcherPath
 Add-Content -LiteralPath $logPath -Value $logLine -Encoding utf8
 Write-Output $shortcutPath

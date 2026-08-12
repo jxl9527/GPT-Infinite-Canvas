@@ -11,7 +11,7 @@ $serviceRunner = Join-Path $scriptRoot 'Run-GPTCanvas-Service.cmd'
 $healthUrl = 'http://127.0.0.1:3220/health'
 $runtimeRoot = Join-Path $appRoot '02_bridge_service\runtime'
 $servicePidPath = Join-Path $runtimeRoot 'service.pid'
-$expectedReleaseVersion = '0.4.0'
+$expectedReleaseVersion = '0.5.3'
 
 function Show-LauncherError {
   param([Parameter(Mandatory)][string]$Message)

@@ -3,6 +3,7 @@ import { mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promi
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { ProtocolError, type ExportRecord, type ImageMime } from "@gpt-canvas/shared";
 import type { CanvasAssetRepository } from "./canvas-asset-repository.js";
+import type { CanvasProjectRepository } from "./canvas-project-repository.js";
 import type { TaskStore } from "./task-store.js";
 
 const EXTENSION_BY_MIME: Readonly<Record<ImageMime, string>> = {
@@ -95,7 +96,8 @@ export class DeliveryRepository {
     readonly projectRoot: string,
     private readonly canvasAssets: CanvasAssetRepository,
     // Kept in the constructor for runtime compatibility; V3 export does not create PS prompt files.
-    private readonly _store: TaskStore
+    private readonly _store: TaskStore,
+    private readonly canvasProject: CanvasProjectRepository
   ) {
     this.configPath = join(resolve(projectRoot), "context", "delivery-target.json");
     this.logPath = join(resolve(projectRoot), "logs", "final-glass-export.ndjson");
@@ -184,6 +186,7 @@ export class DeliveryRepository {
           const assetId = requiredId(input.assetId, /^asset_[A-Za-z0-9_-]+$/, "画布资产标识");
           const versionId = requiredId(input.versionId, /^version_[A-Za-z0-9_-]+$/, "画布版本标识") as `version_${string}`;
           const viewpointName = cleanViewpointName(input.viewpointName);
+          this.assertFinalGlassSelection(assetId, versionId);
           const { asset, bytes } = await this.canvasAssets.readOriginal(assetId);
           if (asset.kind !== "generated") {
             throw new ProtocolError("INVALID_INPUT", "只有已回收到画布的生成成果可以导出");
@@ -260,6 +263,42 @@ export class DeliveryRepository {
         logRelativePath: "logs/final-glass-export.ndjson"
       };
     });
+  }
+
+  private assertFinalGlassSelection(assetId: string, versionId: `version_${string}`): void {
+    const project = this.canvasProject.read();
+    if (!project) throw new ProtocolError("RECOVERY_REQUIRED", "画布项目尚未保存，不能导出最终成果");
+    const versions = Array.isArray(project.versions) ? project.versions : [];
+    const version = versions.find((candidate) => (
+      typeof candidate === "object"
+      && candidate !== null
+      && !Array.isArray(candidate)
+      && (candidate as Record<string, unknown>).id === versionId
+    )) as Record<string, unknown> | undefined;
+    if (!version || version.assetId !== assetId) {
+      throw new ProtocolError("INVALID_INPUT", "导出版本不存在或与画布资产不匹配");
+    }
+    const workflow = typeof project.workflow === "object" && project.workflow !== null && !Array.isArray(project.workflow)
+      ? project.workflow as Record<string, unknown>
+      : null;
+    const viewpoints = Array.isArray(workflow?.viewpoints) ? workflow.viewpoints : [];
+    const selected = viewpoints.some((candidate) => {
+      if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) return false;
+      const viewpoint = candidate as Record<string, unknown>;
+      if (typeof viewpoint.finalGlass !== "object" || viewpoint.finalGlass === null || Array.isArray(viewpoint.finalGlass)) return false;
+      const finalGlass = viewpoint.finalGlass as Record<string, unknown>;
+      return finalGlass.validation === "passed"
+        && finalGlass.status === "selected"
+        && Array.isArray(finalGlass.candidateVersionIds)
+        && finalGlass.candidateVersionIds.includes(versionId)
+        && Array.isArray(finalGlass.selectedVersionIds)
+        && finalGlass.selectedVersionIds.includes(versionId)
+        && typeof finalGlass.finalD5VersionId === "string"
+        && version.parentVersionId === finalGlass.finalD5VersionId;
+    });
+    if (!selected) {
+      throw new ProtocolError("INVALID_TRANSITION", "只有最终阶段已验收并由用户选定的玻璃深化版本可以导出");
+    }
   }
 
   private async appendRecord(record: StoredExportRecord): Promise<void> {

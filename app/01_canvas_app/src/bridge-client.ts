@@ -2,9 +2,12 @@ import type {
   CanvasImageAsset,
   CreateTaskInput,
   ExportRecord,
-  GenerationTask
+  GenerationTask,
+  ProjectFolderImportResult,
+  ProjectFolderManifest
 } from "@gpt-canvas/shared";
 import type { CanvasProjectDocument } from "./project-state";
+import type { CanvasBatchRun, WorkflowStage } from "./project-state";
 
 const BRIDGE_BASE_URL = (import.meta.env.VITE_BRIDGE_BASE_URL as string | undefined)?.replace(/\/$/, "")
   ?? "http://127.0.0.1:3220";
@@ -14,6 +17,18 @@ interface ApiErrorBody {
     code?: string;
     message?: string;
   };
+}
+
+export class BridgeApiError extends Error {
+  readonly code: string;
+  readonly status: number;
+
+  constructor(message: string, code: string, status: number) {
+    super(message);
+    this.name = "BridgeApiError";
+    this.code = code;
+    this.status = status;
+  }
 }
 
 export interface WorkbenchProject {
@@ -88,11 +103,30 @@ export interface FinalGlassBatchExport {
   logRelativePath: string;
 }
 
+export interface CodexCanvasCapabilities {
+  schemaVersion: "1.0";
+  bridgeVersion: string;
+  pluginProtocolVersion: string;
+  activeProjectId: string;
+  canvasProjectLoaded: boolean;
+  canvasRevision: number | null;
+  sourcePolicy: "read-only-copy-import";
+  supportedStages: Array<Exclude<WorkflowStage, "completed">>;
+  supportedTools: string[];
+  automaticFinalSelection: false;
+  arbitraryFileWrite: false;
+  arbitraryCommandExecution: false;
+}
+
 let sessionToken: string | null = null;
 
 async function apiError(response: Response): Promise<Error> {
   const body = await response.json().catch(() => ({})) as ApiErrorBody;
-  return new Error(body.error?.message || `本地文件服务返回 ${response.status}`);
+  return new BridgeApiError(
+    body.error?.message || `本地文件服务返回 ${response.status}`,
+    body.error?.code || "UNKNOWN",
+    response.status
+  );
 }
 
 export async function connectCanvasSession(): Promise<string> {
@@ -417,6 +451,133 @@ export async function listCanvasAssets(): Promise<CanvasImageAsset[]> {
   return body.assets ?? [];
 }
 
+export async function scanProjectFolder(
+  sourceRoot: string,
+  includeSubfolders = false
+): Promise<ProjectFolderManifest> {
+  const response = await authenticatedFetch("/api/v1/canvas/folder-manifests/scan", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sourceRoot, includeSubfolders })
+  });
+  if (!response.ok) throw await apiError(response);
+  return (await response.json() as { manifest: ProjectFolderManifest }).manifest;
+}
+
+export async function selectProjectFolder(): Promise<string | null> {
+  const response = await authenticatedFetch("/api/v1/canvas/folder-manifests/select-folder", {
+    method: "POST"
+  });
+  if (!response.ok) throw await apiError(response);
+  const body = await response.json() as { sourceRoot?: string | null };
+  return typeof body.sourceRoot === "string" && body.sourceRoot.trim() ? body.sourceRoot : null;
+}
+
+export async function readProjectFolderManifest(id: string): Promise<ProjectFolderManifest> {
+  const response = await authenticatedFetch(`/api/v1/canvas/folder-manifests/${encodeURIComponent(id)}`);
+  if (!response.ok) throw await apiError(response);
+  return (await response.json() as { manifest: ProjectFolderManifest }).manifest;
+}
+
+export async function importProjectFolderManifest(
+  id: string,
+  selectedRelativePaths?: readonly string[]
+): Promise<ProjectFolderImportResult> {
+  const response = await authenticatedFetch(`/api/v1/canvas/folder-manifests/${encodeURIComponent(id)}/import`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ...(selectedRelativePaths ? { selectedRelativePaths } : {}) })
+  });
+  const body = await response.json().catch(() => ({})) as {
+    error?: { message?: string };
+    import?: ProjectFolderImportResult;
+  };
+  if (!response.ok && response.status !== 207) {
+    throw new Error(body.error?.message || `本地文件服务返回 ${response.status}`);
+  }
+  if (!body.import) throw new Error("本地文件服务未返回导入结果");
+  return body.import;
+}
+
+export async function readCodexCanvasCapabilities(): Promise<CodexCanvasCapabilities> {
+  const response = await authenticatedFetch("/api/v1/canvas/codex-capabilities");
+  if (!response.ok) throw await apiError(response);
+  const body = await response.json() as { capabilities?: CodexCanvasCapabilities };
+  if (!body.capabilities) throw new Error("本地服务未返回 Codex 能力信息");
+  return body.capabilities;
+}
+
+export async function createCodexCanvasRun(input: {
+  authorizationId: string;
+  manifestId?: string;
+  sourceFolder: string | null;
+  stage: Exclude<WorkflowStage, "completed">;
+  action: "analyze" | "prompt" | "generate";
+  sourceVersionIds: readonly `version_${string}`[];
+  styleReferenceVersionId?: `version_${string}` | null;
+  prompt?: string;
+  maximumGenerations: number;
+  allowManualFallback: boolean;
+  stopOnStructureRisk: boolean;
+  approvedAt: string;
+  confirmed: true;
+}): Promise<{
+  project: CanvasProjectDocument;
+  run: CanvasBatchRun;
+  snapshotRelativePath: string | null;
+  deduplicated: boolean;
+}> {
+  const response = await authenticatedFetch("/api/v1/canvas/codex-runs", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input)
+  });
+  if (!response.ok) throw await apiError(response);
+  return response.json() as Promise<{
+    project: CanvasProjectDocument;
+    run: CanvasBatchRun;
+    snapshotRelativePath: string | null;
+    deduplicated: boolean;
+  }>;
+}
+
+export async function transitionCodexCanvasRun(
+  runId: string,
+  action: "pause" | "resume"
+): Promise<{ project: CanvasProjectDocument; run: CanvasBatchRun; snapshotRelativePath: string | null }> {
+  const response = await authenticatedFetch(
+    `/api/v1/canvas/codex-runs/${encodeURIComponent(runId)}/${action}`,
+    { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }
+  );
+  if (!response.ok) throw await apiError(response);
+  return response.json() as Promise<{
+    project: CanvasProjectDocument;
+    run: CanvasBatchRun;
+    snapshotRelativePath: string | null;
+  }>;
+}
+
+export async function handoffCanvasRun(
+  runId: string,
+  targetRunner: "manual" | "codex",
+  reason: string
+): Promise<{ project: CanvasProjectDocument; run: CanvasBatchRun; snapshotRelativePath: string | null }> {
+  const response = await authenticatedFetch(
+    `/api/v1/canvas/codex-runs/${encodeURIComponent(runId)}/handoff`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ targetRunner, reason, confirmed: true })
+    }
+  );
+  if (!response.ok) throw await apiError(response);
+  return response.json() as Promise<{
+    project: CanvasProjectDocument;
+    run: CanvasBatchRun;
+    snapshotRelativePath: string | null;
+  }>;
+}
+
 export async function readCanvasAssetAsDataUrl(
   assetId: string,
   rendition: "original" | "display" | "thumbnail" = "original"
@@ -498,6 +659,24 @@ export async function saveCanvasProject(
   return response.json() as Promise<{
     project: CanvasProjectDocument;
     snapshotRelativePath: string | null;
+  }>;
+}
+
+export async function preserveCanvasConflictDraft(
+  project: CanvasProjectDocument
+): Promise<{
+  currentProject: CanvasProjectDocument;
+  conflictRelativePath: string;
+}> {
+  const response = await authenticatedFetch("/api/v1/canvas/project/conflict-draft", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ project })
+  });
+  if (!response.ok) throw await apiError(response);
+  return response.json() as Promise<{
+    currentProject: CanvasProjectDocument;
+    conflictRelativePath: string;
   }>;
 }
 

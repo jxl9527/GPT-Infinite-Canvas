@@ -3,7 +3,10 @@ import type {
   GenerationStatus,
   GenerationTask,
   ImageRole,
-  ResponseMode
+  ResponseMode,
+  WorkflowRunAuthorization,
+  WorkflowRunCheckpoint,
+  WorkflowRunnerKind
 } from "@gpt-canvas/shared";
 import type { AnnotationState } from "./annotation-model.js";
 import type { ImageNodeState } from "./canvas-layout.js";
@@ -27,6 +30,27 @@ export type SceneOptimizationStatus = "pending" | "prompt-ready" | "generated" |
 export type FinalGlassStatus = "pending" | "generated" | "selected" | "not-run";
 export type GlassValidationStatus = "pending" | "passed" | "failed";
 export type ViewpointExportStatus = "pending" | "partial" | "completed";
+export const CANDIDATE_REVIEW_KEYS = ["structure", "facade", "site", "material", "atmosphere"] as const;
+
+export function canvasRevisionRequiresSave(
+  revision: number,
+  lastSavedRevision: number,
+  forceSnapshot = false
+): boolean {
+  return forceSnapshot || revision > lastSavedRevision;
+}
+export type CandidateReviewKey = (typeof CANDIDATE_REVIEW_KEYS)[number];
+export type CandidateReviewCheck = "pending" | "passed" | "failed";
+export type CandidateReviewDecision = "pending" | "approved" | "rejected";
+
+export interface CandidateReviewRecord {
+  versionId: `version_${string}`;
+  stage: "scene-optimization" | "final-glass";
+  checks: Record<CandidateReviewKey, CandidateReviewCheck>;
+  decision: CandidateReviewDecision;
+  note: string;
+  updatedAt: string;
+}
 
 export interface ViewpointPreflightState {
   d5ViewVersionId: `version_${string}` | null;
@@ -76,6 +100,7 @@ export interface ViewpointStatusCard {
   sceneOptimization: ViewpointSceneOptimizationState;
   finalGlass: ViewpointFinalGlassState;
   export: ViewpointExportState;
+  candidateReviews: CandidateReviewRecord[];
   updatedAt: string;
 }
 
@@ -113,6 +138,12 @@ export interface CanvasBatchItem {
   taskId: `task_${string}` | null;
   resultVersionIds: `version_${string}`[];
   error: string;
+  runner?: WorkflowRunnerKind;
+  checkpoint?: WorkflowRunCheckpoint | null;
+  idempotencyKey?: string;
+  attemptCount?: number;
+  sourceHash?: string | null;
+  promptHash?: string | null;
 }
 
 export interface CanvasBatchRun {
@@ -127,6 +158,11 @@ export interface CanvasBatchRun {
   styleReferenceVersionId: `version_${string}` | null;
   targetChatUrl?: string | null;
   items: CanvasBatchItem[];
+  runner?: WorkflowRunnerKind;
+  authorization?: WorkflowRunAuthorization | null;
+  codexThreadId?: string | null;
+  leaseOwner?: string | null;
+  leaseExpiresAt?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -205,7 +241,23 @@ export function createViewpointStatusCard(input: {
       exportedAt: null,
       status: stage === "completed" ? "completed" : "pending"
     },
+    candidateReviews: [],
     updatedAt: now
+  };
+}
+
+function normalizedCandidateReview(review: CandidateReviewRecord): CandidateReviewRecord {
+  const checks = Object.fromEntries(CANDIDATE_REVIEW_KEYS.map((key) => [
+    key,
+    review.checks?.[key] === "passed" || review.checks?.[key] === "failed" ? review.checks[key] : "pending"
+  ])) as Record<CandidateReviewKey, CandidateReviewCheck>;
+  return {
+    versionId: review.versionId,
+    stage: review.stage === "final-glass" ? "final-glass" : "scene-optimization",
+    checks,
+    decision: review.decision === "approved" || review.decision === "rejected" ? review.decision : "pending",
+    note: typeof review.note === "string" ? review.note.slice(0, 1000) : "",
+    updatedAt: typeof review.updatedAt === "string" && review.updatedAt ? review.updatedAt : new Date().toISOString()
   };
 }
 
@@ -230,7 +282,10 @@ function normalizedViewpoint(raw: Partial<ViewpointStatusCard> & { stage?: Workf
     preflight: { ...base.preflight, ...(raw.preflight ?? {}) },
     sceneOptimization: { ...base.sceneOptimization, ...(raw.sceneOptimization ?? {}) },
     finalGlass: { ...base.finalGlass, ...(raw.finalGlass ?? {}) },
-    export: { ...base.export, ...(raw.export ?? {}) }
+    export: { ...base.export, ...(raw.export ?? {}) },
+    candidateReviews: Array.isArray(raw.candidateReviews)
+      ? raw.candidateReviews.map((review) => normalizedCandidateReview(review))
+      : []
   } as ViewpointStatusCard;
 }
 
@@ -244,13 +299,35 @@ function normalizedBatchRun(run: CanvasBatchRun | null): CanvasBatchRun | null {
   );
   return {
     ...structuredClone(run),
+    runner: run.runner === "codex" ? "codex" : "manual",
+    authorization: run.authorization ? structuredClone(run.authorization) : null,
+    codexThreadId: typeof run.codexThreadId === "string" ? run.codexThreadId : null,
+    leaseOwner: typeof run.leaseOwner === "string" ? run.leaseOwner : null,
+    leaseExpiresAt: typeof run.leaseExpiresAt === "string" ? run.leaseExpiresAt : null,
     status: legacyActive ? "paused" : run.status,
     workflowStage: rawStage ? v3Stage(rawStage) : null,
     items: legacyActive
       ? run.items.map((item) => item.status === "queued" || item.status === "running"
-        ? { ...item, status: "failed", error: "旧四阶段批次已保留但不会自动续跑；请按V3三阶段规则重新建立批次" }
-        : structuredClone(item))
-      : structuredClone(run.items),
+        ? {
+          ...item,
+          runner: item.runner === "codex" ? "codex" : (run.runner === "codex" ? "codex" : "manual"),
+          idempotencyKey: item.idempotencyKey || `legacy:${run.id}:${item.id}`,
+          attemptCount: Number.isInteger(item.attemptCount) ? Math.max(0, item.attemptCount ?? 0) : 0,
+          status: "failed",
+          error: "旧四阶段批次已保留但不会自动续跑；请按V3三阶段规则重新建立批次"
+        }
+        : {
+          ...structuredClone(item),
+          runner: item.runner === "codex" ? "codex" : (run.runner === "codex" ? "codex" : "manual"),
+          idempotencyKey: item.idempotencyKey || `legacy:${run.id}:${item.id}`,
+          attemptCount: Number.isInteger(item.attemptCount) ? Math.max(0, item.attemptCount ?? 0) : 0
+        })
+      : run.items.map((item) => ({
+        ...structuredClone(item),
+        runner: item.runner === "codex" ? "codex" : (run.runner === "codex" ? "codex" : "manual"),
+        idempotencyKey: item.idempotencyKey || `legacy:${run.id}:${item.id}`,
+        attemptCount: Number.isInteger(item.attemptCount) ? Math.max(0, item.attemptCount ?? 0) : 0
+      })),
     targetChatUrl: typeof run.targetChatUrl === "string" && run.targetChatUrl.trim()
       ? run.targetChatUrl.trim()
       : null
@@ -275,6 +352,111 @@ function normalizedWorkflow(workflow: CanvasWorkflowState | undefined): CanvasWo
       : [],
     textCards: Array.isArray(workflow.textCards) ? structuredClone(workflow.textCards) : [],
     batchRun: normalizedBatchRun(workflow.batchRun ?? null)
+  };
+}
+
+export function sanitizeCanvasWorkflowReferences(
+  workflow: CanvasWorkflowState,
+  validVersionIds: ReadonlySet<string>
+): CanvasWorkflowState {
+  const next = normalizedWorkflow(workflow);
+  const valid = (versionId: `version_${string}` | null | undefined) => (
+    versionId && validVersionIds.has(versionId) ? versionId : null
+  );
+  const validList = (versionIds: readonly `version_${string}`[]) => (
+    versionIds.filter((versionId) => validVersionIds.has(versionId))
+  );
+  return {
+    ...next,
+    viewpoints: next.viewpoints.map((viewpoint) => {
+      const sourceVersionId = valid(viewpoint.sourceVersionId);
+      const selectedVersionId = valid(viewpoint.selectedVersionId);
+      const sceneCandidates = validList(viewpoint.sceneOptimization.candidateVersionIds);
+      const sceneSelected = valid(viewpoint.sceneOptimization.selectedVersionId);
+      const finalCandidates = validList(viewpoint.finalGlass.candidateVersionIds);
+      const finalSelected = validList(viewpoint.finalGlass.selectedVersionIds);
+      const exportedPairs = viewpoint.export.exportedVersionIds.flatMap((versionId, index) => (
+        validVersionIds.has(versionId)
+          ? [{ versionId, file: viewpoint.export.exportedFiles[index] ?? "" }]
+          : []
+      ));
+      const sceneStatus = sceneSelected
+        ? "selected"
+        : sceneCandidates.length
+          ? "generated"
+          : viewpoint.sceneOptimization.status === "generated" || viewpoint.sceneOptimization.status === "selected"
+            ? "pending"
+            : viewpoint.sceneOptimization.status;
+      const finalStatus = finalSelected.length
+        ? "selected"
+        : finalCandidates.length
+          ? "generated"
+          : viewpoint.finalGlass.status === "generated" || viewpoint.finalGlass.status === "selected"
+            ? "pending"
+            : viewpoint.finalGlass.status;
+      const exportStatus = exportedPairs.length === viewpoint.export.exportedVersionIds.length
+        ? viewpoint.export.status
+        : exportedPairs.length
+          ? "partial"
+          : "pending";
+      return {
+        ...viewpoint,
+        sourceVersionId,
+        selectedVersionId,
+        preflight: {
+          ...viewpoint.preflight,
+          d5ViewVersionId: valid(viewpoint.preflight.d5ViewVersionId),
+          suReferenceVersionId: valid(viewpoint.preflight.suReferenceVersionId)
+        },
+        sceneOptimization: {
+          ...viewpoint.sceneOptimization,
+          structureBaseVersionId: valid(viewpoint.sceneOptimization.structureBaseVersionId),
+          styleReferenceVersionId: valid(viewpoint.sceneOptimization.styleReferenceVersionId),
+          candidateVersionIds: sceneCandidates,
+          selectedVersionId: sceneSelected,
+          status: sceneStatus
+        },
+        finalGlass: {
+          ...viewpoint.finalGlass,
+          finalD5VersionId: valid(viewpoint.finalGlass.finalD5VersionId),
+          candidateVersionIds: finalCandidates,
+          selectedVersionIds: finalSelected,
+          validation: finalSelected.length ? viewpoint.finalGlass.validation : "pending",
+          status: finalStatus
+        },
+        export: {
+          ...viewpoint.export,
+          exportedVersionIds: exportedPairs.map((pair) => pair.versionId),
+          exportedFiles: exportedPairs.map((pair) => pair.file),
+          status: exportStatus
+        },
+        candidateReviews: viewpoint.candidateReviews
+          .filter((review) => validVersionIds.has(review.versionId))
+          .map((review) => normalizedCandidateReview(review))
+      };
+    }),
+    handoffs: next.handoffs.map((handoff) => ({
+      ...handoff,
+      sourceVersionId: valid(handoff.sourceVersionId),
+      selectedVersionId: valid(handoff.selectedVersionId)
+    })),
+    textCards: next.textCards.map((card) => ({
+      ...card,
+      sourceVersionId: valid(card.sourceVersionId)
+    })),
+    batchRun: next.batchRun
+      ? {
+        ...next.batchRun,
+        styleReferenceVersionId: valid(next.batchRun.styleReferenceVersionId),
+        items: next.batchRun.items.map((item) => ({
+          ...item,
+          attachmentVersionIds: item.attachmentVersionIds
+            ? validList(item.attachmentVersionIds)
+            : undefined,
+          resultVersionIds: validList(item.resultVersionIds)
+        }))
+      }
+      : null
   };
 }
 
@@ -377,6 +559,10 @@ export function buildCanvasProjectDocument(input: ProjectBuildInput): CanvasProj
     taskId: node.taskId,
     createdAt: input.createdAt
   }));
+  const workflow = sanitizeCanvasWorkflowReferences(
+    input.workflow,
+    new Set(versions.map((version) => version.id))
+  );
   const imageNodes = input.nodes.map((node, index): CanvasProjectNode => ({
     id: node.id,
     type: "image",
@@ -449,7 +635,7 @@ export function buildCanvasProjectDocument(input: ProjectBuildInput): CanvasProj
     assets,
     versions,
     taskLinks: [...taskLinksById.values()],
-    workflow: normalizedWorkflow(input.workflow)
+    workflow
   };
 }
 

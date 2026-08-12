@@ -19,11 +19,15 @@ import "konva/lib/shapes/Rect";
 import "konva/lib/shapes/Text";
 import "konva/lib/shapes/Transformer";
 import {
+  BridgeApiError,
   cancelGenerationTask,
   connectCanvasSession,
+  createCodexCanvasRun,
   createGenerationTask,
   downloadOriginalAsset,
+  handoffCanvasRun,
   importCanvasAsset,
+  importProjectFolderManifest,
   listCanvasAssets,
   listPromptLibrary,
   readActiveProjectRequirements,
@@ -31,21 +35,28 @@ import {
   readCanvasAssetAsDataUrl,
   readCanvasAssetAsObjectUrl,
   readCanvasProject,
+  readCodexCanvasCapabilities,
   readDeliveryTarget,
   readFileAsDataUrl,
   readGenerationResultAsDataUrl,
   readGenerationTask,
+  scanProjectFolder,
+  selectProjectFolder,
+  transitionCodexCanvasRun,
   exportFinalGlassSelections,
   saveGeneratedAsset,
   saveDeliveryTarget,
   savePromptLibraryItem,
   saveCanvasAssetDerivatives,
   saveCanvasProject,
+  preserveCanvasConflictDraft,
   saveAnnotationExport,
   deletePromptLibraryItem,
   releaseAllCanvasAssetObjectUrls,
+  releaseCanvasAssetObjectUrl,
   updateActiveProjectRequirements,
   type ActiveProjectRequirements,
+  type CodexCanvasCapabilities,
   type DeliveryTarget,
   type PromptLibraryItem
 } from "./bridge-client";
@@ -56,7 +67,10 @@ import {
   type GenerationProvider,
   type GenerationStatus,
   type GenerationTask,
-  type ImageRole
+  type ImageRole,
+  type ProjectFolderFileRole,
+  type ProjectFolderManifest,
+  type WorkflowRunnerKind
 } from "@gpt-canvas/shared";
 import { renderAnnotationExport } from "./annotation-export";
 import {
@@ -75,13 +89,13 @@ import {
   buildCanvasRelation,
   coverCropForRenderedImage,
   fitImportedImage,
-  normalizeImageFrames,
   placeChildToRightStacked,
   placeImageContextToolbar,
-  removeImageNode,
+  removeImageNodes,
   type ImageNodeState,
   type OutputRatio
 } from "./canvas-layout";
+import { autoArrangeCanvasObjects } from "./auto-layout";
 import { fitRect, fixedScreenScale, zoomAtPoint, type Viewport } from "./canvas-math";
 import { canvasKeyboardAction, isMiddleMouseButton } from "./canvas-input";
 import {
@@ -100,10 +114,13 @@ import {
 import { createImageDerivatives, resizeImageToExactDimensions } from "./image-derivatives";
 import {
   batchProgress,
+  browserAutomationOwnsBatch,
+  codexStageAutomationPlan,
   createCanvasBatchRun,
   createStageCanvasBatchRun,
   defaultWorkflowAction,
   nextQueuedBatchItem,
+  selectCodexCanvasSources,
   updateBatchItem,
   WORKFLOW_ACTION_LABELS,
   WORKFLOW_STAGE_ACTIONS,
@@ -111,10 +128,13 @@ import {
 } from "./batch-queue";
 import {
   buildCanvasProjectDocument,
+  canvasRevisionRequiresSave,
   createViewpointStatusCard,
   restoreCanvasProjectStructure,
+  sanitizeCanvasWorkflowReferences,
   type CanvasBatchItem,
   type CanvasBatchRun,
+  type CanvasProjectDocument,
   type CanvasWorkflowState,
   type HandoffTarget,
   type StandardHandoffRecord,
@@ -161,10 +181,23 @@ import {
   type CanvasObjectGroup
 } from "./canvas-object-navigation";
 import { CanvasObjectNavigator } from "./CanvasObjectNavigator";
+import { ViewpointTaskCenter, type UtilityPanelWidth } from "./ViewpointTaskCenter";
+import { TaskStartLauncher } from "./TaskStartLauncher";
+import {
+  TASK_START_DISMISSED_STORAGE_KEY,
+  shouldShowTaskStart
+} from "./task-start";
+import {
+  buildViewpointTaskSummaries,
+  businessCanvasNodeLabel,
+  candidateReviewComplete,
+  updateCandidateReviewRecord
+} from "./viewpoint-task-center";
 import {
   WORKBENCH_HEIGHT_STORAGE_KEY,
   WORKBENCH_WIDTH_STORAGE_KEY,
   appendUnifiedTaskRequirement,
+  batchWorkbenchEntryVisible,
   batchWorkbenchStatus,
   clampWorkbenchHeight,
   clampWorkbenchWidth,
@@ -202,6 +235,24 @@ type Tool = "select" | "marquee" | "text" | "arrow" | "freehand" | "rectangle";
 type ServiceState = "connecting" | "connected" | "offline";
 type SaveState = "loading" | "saving" | "saved" | "error";
 type ImportLayout = "cascade" | "vertical";
+type CodexStartSource = "canvas" | "folder";
+const UTILITY_PANEL_WIDTH_STORAGE_KEY = "gpt-canvas:utility-panel-width:v1";
+
+interface SaveConflictState {
+  localProject: CanvasProjectDocument;
+  remoteProject: CanvasProjectDocument;
+  sourceLabel: string;
+  detectedAt: string;
+  message: string;
+}
+
+function projectUpdateSource(project: CanvasProjectDocument): string {
+  const run = project.workflow?.batchRun;
+  if (run && run.status !== "completed") {
+    return run.runner === "codex" ? "Codex 自动运行" : "浏览器批量任务";
+  }
+  return "另一画布窗口或后台操作";
+}
 
 const ATTACHMENT_ROLE_LABELS: Readonly<Record<ImageRole, string>> = {
   "structure-base": "唯一结构与构图依据",
@@ -220,6 +271,13 @@ const STAGE_SELECTION_HINTS: Readonly<Record<WorkflowStage, string>> = {
   "scene-optimization": "每张结构底图独立处理；先返回提示词卡，只有用户明确发起才生成D5目标图。",
   "final-glass": "每张最终D5完整图独立深化玻璃；无需蒙版或后期通道，返回完整画幅。",
   completed: "已选玻璃深化成果全部成功导出后，画布任务完成。"
+};
+
+const PROJECT_FOLDER_ROLE_LABELS: Readonly<Record<ProjectFolderFileRole, string>> = {
+  "d5-view": "D5 结构底图",
+  "su-reference": "SU 可见细节参考",
+  "style-reference": "风格参考",
+  "ignored-channel": "后期通道（忽略）"
 };
 
 interface TextEditorState {
@@ -286,6 +344,54 @@ function useElementSize<T extends HTMLElement>() {
 const MAX_BROWSER_IMAGE_CACHE = 64;
 const browserImageCache = new Map<string, Promise<HTMLImageElement>>();
 
+class BoundedAssetLoadQueue {
+  private active = 0;
+  private readonly waiting: Array<() => void> = [];
+
+  constructor(private readonly concurrency: number) {}
+
+  run<T>(load: () => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const start = () => {
+        this.active += 1;
+        void load().then(resolve, reject).finally(() => {
+          this.active -= 1;
+          this.waiting.shift()?.();
+        });
+      };
+      if (this.active < this.concurrency) start();
+      else this.waiting.push(start);
+    });
+  }
+}
+
+function normalizeRadioTabStops(root: ParentNode): void {
+  for (const group of root.querySelectorAll<HTMLElement>('[role="radiogroup"]')) {
+    const radios = [...group.querySelectorAll<HTMLButtonElement>('button[role="radio"]:not(:disabled)')];
+    if (!radios.length) continue;
+    const active = radios.find((radio) => radio.getAttribute("aria-checked") === "true") ?? radios[0];
+    for (const radio of radios) radio.tabIndex = radio === active ? 0 : -1;
+  }
+}
+
+function handleRadioGroupKeyDown(event: KeyboardEvent): void {
+  if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+  const target = event.target instanceof HTMLElement ? event.target : null;
+  const group = target?.closest<HTMLElement>('[role="radiogroup"]');
+  if (!group) return;
+  const radios = [...group.querySelectorAll<HTMLButtonElement>('button[role="radio"]:not(:disabled)')];
+  if (!radios.length) return;
+  const current = Math.max(0, radios.findIndex((radio) => radio === target || radio.contains(target)));
+  const next = event.key === "Home"
+    ? 0
+    : event.key === "End"
+      ? radios.length - 1
+      : (current + (event.key === "ArrowRight" || event.key === "ArrowDown" ? 1 : -1) + radios.length) % radios.length;
+  event.preventDefault();
+  radios[next]?.focus();
+  radios[next]?.click();
+}
+
 function loadBrowserImage(src: string): Promise<HTMLImageElement> {
   const cached = browserImageCache.get(src);
   if (cached) return cached;
@@ -307,7 +413,7 @@ function loadBrowserImage(src: string): Promise<HTMLImageElement> {
 function useBrowserImage(src: string, enabled = true) {
   const [image, setImage] = useState<HTMLImageElement | null>(null);
   useEffect(() => {
-    if (!enabled) {
+    if (!enabled || !src) {
       setImage(null);
       return;
     }
@@ -953,9 +1059,9 @@ function CanvasTextCardNode({
               disabled={!nextTaskText}
               onClick={() => {
                 onContinue(nextTaskText);
-                announceFeedback("已载入 02C 继续优化");
+                announceFeedback("已载入优化阶段的继续优化提示词");
               }}
-            >继续优化（02C）</button>
+            >继续优化提示词</button>
           )}
           <button
             type="button"
@@ -1169,6 +1275,23 @@ function persistWorkbenchWidth(value: number): void {
   }
 }
 
+function readTaskStartDismissed(): boolean {
+  try {
+    return window.localStorage.getItem(TASK_START_DISMISSED_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function readUtilityPanelWidth(): UtilityPanelWidth {
+  try {
+    const value = window.localStorage.getItem(UTILITY_PANEL_WIDTH_STORAGE_KEY);
+    return value === "compact" || value === "wide" ? value : "standard";
+  } catch {
+    return "standard";
+  }
+}
+
 export function App({
   projectName,
   onBackToProjects
@@ -1194,6 +1317,23 @@ export function App({
   const [viewport, setViewport] = useState<Viewport>({ x: 72, y: 54, scale: 0.74 });
   const [serviceState, setServiceState] = useState<ServiceState>("connecting");
   const [importing, setImporting] = useState(false);
+  const [executionMode, setExecutionMode] = useState<WorkflowRunnerKind>("manual");
+  const [codexStartSource, setCodexStartSource] = useState<CodexStartSource>("canvas");
+  const [projectFolderPath, setProjectFolderPath] = useState("");
+  const [projectFolderRecursive, setProjectFolderRecursive] = useState(false);
+  const [projectFolderManifest, setProjectFolderManifest] = useState<ProjectFolderManifest | null>(null);
+  const [selectedManifestPaths, setSelectedManifestPaths] = useState<string[]>([]);
+  const [folderRunSourceVersionIds, setFolderRunSourceVersionIds] = useState<`version_${string}`[]>([]);
+  const [scanningProjectFolder, setScanningProjectFolder] = useState(false);
+  const [selectingProjectFolder, setSelectingProjectFolder] = useState(false);
+  const [importingProjectFolder, setImportingProjectFolder] = useState(false);
+  const [codexCapabilities, setCodexCapabilities] = useState<CodexCanvasCapabilities | null>(null);
+  const [checkingCodexCapabilities, setCheckingCodexCapabilities] = useState(false);
+  const [creatingCodexRun, setCreatingCodexRun] = useState(false);
+  const [codexMaximumGenerations, setCodexMaximumGenerations] = useState(0);
+  const [codexAllowManualFallback, setCodexAllowManualFallback] = useState(true);
+  const [codexStopOnStructureRisk, setCodexStopOnStructureRisk] = useState(true);
+  const [codexAuthorizationConfirmed, setCodexAuthorizationConfirmed] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [deliveryTarget, setDeliveryTarget] = useState<DeliveryTarget | null>(null);
   const [deliveryTargetDraft, setDeliveryTargetDraft] = useState("");
@@ -1232,7 +1372,8 @@ export function App({
   const [promptTitle, setPromptTitle] = useState("");
   const [promptDeleteConfirmId, setPromptDeleteConfirmId] = useState("");
   const [savingPrompt, setSavingPrompt] = useState(false);
-  const [workbenchPanel, setWorkbenchPanel] = useState<"batch" | "prompts" | "preview" | "delivery" | null>(null);
+  const [workbenchPanel, setWorkbenchPanel] = useState<"viewpoints" | "execution" | "batch" | "prompts" | "preview" | "delivery" | null>(null);
+  const [comparisonVersionIds, setComparisonVersionIds] = useState<`version_${string}`[]>([]);
   const [contextPromptOpen, setContextPromptOpen] = useState(false);
   const [contextInputFocusRequested, setContextInputFocusRequested] = useState(false);
   const [loadedTextCardId, setLoadedTextCardId] = useState<CanvasTextCard["id"] | null>(null);
@@ -1255,10 +1396,14 @@ export function App({
   const [returnedResultIds, setReturnedResultIds] = useState<string[]>([]);
   const [projectLoaded, setProjectLoaded] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>("loading");
+  const [saveConflict, setSaveConflict] = useState<SaveConflictState | null>(null);
+  const [recoveringSaveConflict, setRecoveringSaveConflict] = useState(false);
   const [returningToProjects, setReturningToProjects] = useState(false);
   const [historyVersion, setHistoryVersion] = useState(0);
   const [workbenchHeight, setWorkbenchHeight] = useState<number | null>(readSavedWorkbenchHeight);
   const [workbenchWidth, setWorkbenchWidth] = useState<number | null>(readSavedWorkbenchWidth);
+  const [taskStartDismissed, setTaskStartDismissed] = useState(readTaskStartDismissed);
+  const [utilityPanelWidth, setUtilityPanelWidth] = useState<UtilityPanelWidth>(readUtilityPanelWidth);
   const [resizingWorkbench, setResizingWorkbench] = useState(false);
   const stageRef = useRef<Konva.Stage>(null);
   const middlePanningRef = useRef(false);
@@ -1282,7 +1427,15 @@ export function App({
   const snapshottedTaskRef = useRef<string | null>(null);
   const saveInFlightRef = useRef<Promise<boolean> | null>(null);
   const saveRequestedRef = useRef(false);
+  const saveConflictActiveRef = useRef(false);
   const saveReturnedTextCardImmediatelyRef = useRef(false);
+  const restoredAssetRenditionsRef = useRef(new Map<string, {
+    assetId: string;
+    rendition: "original" | "display";
+  }>());
+  const restoredAssetLoadPromisesRef = useRef(new Map<string, Promise<string>>());
+  const restoredAssetLoadQueueRef = useRef(new BoundedAssetLoadQueue(4));
+  const assetLoadingActiveRef = useRef(true);
   const latestSaveStateRef = useRef<LatestSaveState>({
     projectName,
     revision,
@@ -1437,19 +1590,98 @@ export function App({
   };
 
   useEffect(() => () => {
+    assetLoadingActiveRef.current = false;
     browserImageCache.clear();
     releaseAllCanvasAssetObjectUrls();
   }, []);
 
+  useEffect(() => {
+    document.addEventListener("keydown", handleRadioGroupKeyDown);
+    return () => document.removeEventListener("keydown", handleRadioGroupKeyDown);
+  }, []);
+
+  useEffect(() => {
+    normalizeRadioTabStops(document);
+  });
+
   const nodeIndex = useMemo(() => buildCanvasNodeIndex(nodes), [nodes]);
+  const viewpointTasks = useMemo(
+    () => buildViewpointTaskSummaries(viewpoints, nodes, batchRun),
+    [batchRun, nodes, viewpoints]
+  );
   const selectedNode = selectedId ? nodeIndex.byId.get(selectedId) ?? null : null;
   const selectedBatchNodes = useMemo(
     () => selectedNodesInCanvasOrder(nodes, selectedNodeIds),
     [nodes, selectedNodeIds]
   );
+  const preparedCodexCanvasSources = useMemo(() => batchSourceVersionIds
+    .map((versionId) => nodeIndex.byVersionId.get(versionId) ?? null)
+    .filter((node): node is ImageNodeState => Boolean(node)), [batchSourceVersionIds, nodeIndex]);
+  const registeredCodexCanvasSources = useMemo(() => {
+    const registeredVersionIds = new Set(viewpoints.flatMap((viewpoint) => [
+      viewpoint.sourceVersionId,
+      viewpoint.preflight.d5ViewVersionId,
+      viewpoint.sceneOptimization.structureBaseVersionId,
+      viewpoint.finalGlass.finalD5VersionId
+    ].filter((versionId): versionId is `version_${string}` => Boolean(versionId))));
+    return nodes.filter((node) => registeredVersionIds.has(node.versionId));
+  }, [nodes, viewpoints]);
+  const codexReferenceVersionIds = useMemo(() => new Set<`version_${string}`>([
+    ...Object.values(preflightPairVersionIds).filter((versionId): versionId is `version_${string}` => Boolean(versionId)),
+    ...viewpoints.flatMap((viewpoint) => viewpoint.preflight.suReferenceVersionId
+      ? [viewpoint.preflight.suReferenceVersionId]
+      : [])
+  ]), [preflightPairVersionIds, viewpoints]);
+  const selectedCodexCanvasSources = useMemo(() => selectedBatchNodes.filter((node) => (
+    node.id !== styleReferenceId && !codexReferenceVersionIds.has(node.versionId)
+  )), [codexReferenceVersionIds, selectedBatchNodes, styleReferenceId]);
+  const importedCodexCanvasFallback = useMemo(() => {
+    return nodes.filter((node) => (
+      node.origin === "imported"
+      && node.id !== styleReferenceId
+      && !codexReferenceVersionIds.has(node.versionId)
+    ));
+  }, [codexReferenceVersionIds, nodes, styleReferenceId]);
+  const codexCanvasSources = useMemo(() => selectCodexCanvasSources(
+    selectedCodexCanvasSources,
+    preparedCodexCanvasSources,
+    registeredCodexCanvasSources,
+    importedCodexCanvasFallback
+  ), [
+    importedCodexCanvasFallback,
+    preparedCodexCanvasSources,
+    registeredCodexCanvasSources,
+    selectedCodexCanvasSources
+  ]);
+  const folderCodexRunSources = useMemo(() => folderRunSourceVersionIds
+      .map((versionId) => nodeIndex.byVersionId.get(versionId) ?? null)
+      .filter((node): node is ImageNodeState => Boolean(node)), [folderRunSourceVersionIds, nodeIndex]);
+  const codexRunSources = codexStartSource === "canvas" ? codexCanvasSources : folderCodexRunSources;
+  const codexCanvasSourceLabel = selectedCodexCanvasSources.length
+    ? "当前框选"
+    : preparedCodexCanvasSources.length
+      ? "已准备批次"
+      : registeredCodexCanvasSources.length
+        ? "已登记 D5 视角"
+        : "画布导入图";
+  const codexAutomationPlan = useMemo(() => codexStageAutomationPlan(bulkStage), [bulkStage]);
   const normalizedCustomGptUrl = useMemo(() => normalizeCustomGptUrl(customGptUrl), [customGptUrl]);
   const activeTargetChatUrl = customGptEnabled ? normalizedCustomGptUrl ?? "" : "";
   const generationTargetReady = !customGptEnabled || Boolean(normalizedCustomGptUrl);
+
+  useEffect(() => {
+    setCodexMaximumGenerations(codexAutomationPlan.action === "generate" ? Math.min(200, codexRunSources.length * 2) : 0);
+    setCodexAuthorizationConfirmed(false);
+  }, [codexAutomationPlan.action, codexRunSources.length]);
+
+  useEffect(() => {
+    if (executionMode !== "codex" || serviceState !== "connected" || checkingCodexCapabilities || codexCapabilities) return;
+    setCheckingCodexCapabilities(true);
+    void readCodexCanvasCapabilities()
+      .then(setCodexCapabilities)
+      .catch((error) => setNotice(error instanceof Error ? error.message : "Codex 能力检查失败"))
+      .finally(() => setCheckingCodexCapabilities(false));
+  }, [checkingCodexCapabilities, codexCapabilities, executionMode, serviceState]);
   const commitCustomGptTarget = useCallback(() => {
     const normalized = normalizeCustomGptUrl(customGptDraft);
     if (!normalized) {
@@ -1786,16 +2018,16 @@ export function App({
         if (project) {
           const restored = restoreCanvasProjectStructure(project);
           const assetMetadata = new Map(project.assets.map((asset) => [asset.id, asset]));
-          const displayCache = new Map<string, Promise<string>>();
-          const restoredNodes = await Promise.all(restored.imageNodes.map(async (node) => {
+          restoredAssetRenditionsRef.current.clear();
+          restoredAssetLoadPromisesRef.current.clear();
+          const restoredNodes = restored.imageNodes.map((node) => {
             const asset = assetMetadata.get(node.assetId);
-            let source = displayCache.get(node.assetId);
-            if (!source) {
-              source = readCanvasAssetAsObjectUrl(node.assetId, asset?.display ? "display" : "original");
-              displayCache.set(node.assetId, source);
-            }
-            return { ...node, src: await source };
-          }));
+            restoredAssetRenditionsRef.current.set(node.id, {
+              assetId: node.assetId,
+              rendition: asset?.display ? "display" : "original"
+            });
+            return { ...node, src: "" };
+          });
           if (cancelled) return;
           projectIdRef.current = project.projectId;
           projectCreatedAtRef.current = project.createdAt;
@@ -1835,6 +2067,11 @@ export function App({
   }, [projectLoaded, serviceState]);
 
   const saveProjectNow = useCallback(async () => {
+    if (saveConflictActiveRef.current) {
+      setSaveState("error");
+      setNotice("自动保存已暂停：请先处理项目版本冲突，本地改动仍保留在当前画布中。");
+      return false;
+    }
     if (saveInFlightRef.current) {
       saveRequestedRef.current = true;
       return saveInFlightRef.current;
@@ -1843,13 +2080,17 @@ export function App({
       do {
         saveRequestedRef.current = false;
         const snapshot = latestSaveStateRef.current;
+        let attemptedProject: CanvasProjectDocument | null = null;
         setSaveState("saving");
         try {
-          const assets = await listCanvasAssets();
           const forceSnapshot = Boolean(
             snapshot.generationTask?.status === "completed"
             && snapshot.generationTask.id !== snapshottedTaskRef.current
           );
+          if (!canvasRevisionRequiresSave(snapshot.revision, lastSavedRevisionRef.current, forceSnapshot)) {
+            continue;
+          }
+          const assets = await listCanvasAssets();
           const project = buildCanvasProjectDocument({
             projectId: projectIdRef.current,
             title: snapshot.projectName,
@@ -1863,6 +2104,7 @@ export function App({
             taskParentVersionId: snapshot.taskParentVersionId,
             workflow: snapshot.workflow
           });
+          attemptedProject = project;
           await saveCanvasProject(project, forceSnapshot);
           lastSavedRevisionRef.current = Math.max(lastSavedRevisionRef.current, snapshot.revision);
           if (forceSnapshot && snapshot.generationTask) {
@@ -1873,6 +2115,26 @@ export function App({
           }
         } catch (error) {
           setSaveState("error");
+          if (
+            attemptedProject
+            && error instanceof BridgeApiError
+            && error.code === "INVALID_TRANSITION"
+            && /修订|更新|覆盖/.test(error.message)
+          ) {
+            const remoteProject = await readCanvasProject().catch(() => null);
+            if (remoteProject) {
+              saveConflictActiveRef.current = true;
+              setSaveConflict({
+                localProject: attemptedProject,
+                remoteProject,
+                sourceLabel: projectUpdateSource(remoteProject),
+                detectedAt: new Date().toISOString(),
+                message: error.message
+              });
+              setNotice(`检测到并发更新：当前画布为 R${attemptedProject.revision}，项目已由${projectUpdateSource(remoteProject)}更新到 R${remoteProject.revision}。`);
+              return false;
+            }
+          }
           setNotice(error instanceof Error ? `自动保存失败：${error.message}` : "自动保存失败");
           return false;
         }
@@ -1909,9 +2171,89 @@ export function App({
 
   const retryProjectSave = useCallback(async () => {
     if (serviceState !== "connected" || !projectLoaded) return;
+    if (saveConflictActiveRef.current) {
+      setNotice("当前不是普通网络错误：请先在冲突恢复面板中保留草稿并载入最新版本。");
+      return;
+    }
     saveRequestedRef.current = true;
     if (await saveProjectNow()) setNotice("画布已重新保存。");
   }, [projectLoaded, saveProjectNow, serviceState]);
+
+  const applyAuthoritativeProject = useCallback((project: CanvasProjectDocument, message: string) => {
+    const restored = restoreCanvasProjectStructure(project);
+    const assetMetadata = new Map(project.assets.map((asset) => [asset.id, asset]));
+    releaseAllCanvasAssetObjectUrls();
+    restoredAssetRenditionsRef.current.clear();
+    restoredAssetLoadPromisesRef.current.clear();
+    const restoredNodes = restored.imageNodes.map((node) => {
+      const asset = assetMetadata.get(node.assetId);
+      restoredAssetRenditionsRef.current.set(node.id, {
+        assetId: node.assetId,
+        rendition: asset?.display ? "display" : "original"
+      });
+      return { ...node, src: "" };
+    });
+    projectIdRef.current = project.projectId;
+    projectCreatedAtRef.current = project.createdAt;
+    lastSavedRevisionRef.current = project.revision;
+    setNodes(restoredNodes);
+    setAnnotations(restored.annotations);
+    setTextCards(restored.workflow.textCards);
+    setViewport(restored.viewport);
+    setTaskParentVersionId(restored.taskParentVersionId);
+    setViewpoints(restored.workflow.viewpoints);
+    setHandoffs(restored.workflow.handoffs);
+    setActiveViewpointId(restored.workflow.activeViewpointId);
+    setBatchRun(restored.workflow.batchRun);
+    setBatchSourceVersionIds(restored.workflow.batchRun?.items.map((item) => item.sourceVersionId) ?? []);
+    const fixedCustomGptUrl = resolveFixedCustomGptUrl(readFixedCustomGptUrl(), restored.workflow.customGptUrl);
+    setCustomGptUrl(fixedCustomGptUrl);
+    setCustomGptDraft(fixedCustomGptUrl);
+    setCustomGptEnabled(restored.workflow.customGptEnabled && Boolean(fixedCustomGptUrl));
+    if (fixedCustomGptUrl) persistFixedCustomGptUrl(fixedCustomGptUrl);
+    setRevision(project.revision);
+    setSelectedId(restoredNodes[0]?.id ?? null);
+    setSelectedNodeIds(restoredNodes[0] ? [restoredNodes[0].id] : []);
+    setSelectedTextCardId(null);
+    setSelectedTextCardIds([]);
+    setSelectedAnnotationId(null);
+    setSaveState("saved");
+    setNotice(message);
+  }, []);
+
+  const recoverSaveConflict = useCallback(async () => {
+    if (!saveConflict || recoveringSaveConflict || serviceState !== "connected") return;
+    setRecoveringSaveConflict(true);
+    try {
+      const snapshot = latestSaveStateRef.current;
+      const assets = await listCanvasAssets();
+      const localProject = buildCanvasProjectDocument({
+        projectId: projectIdRef.current,
+        title: snapshot.projectName,
+        createdAt: projectCreatedAtRef.current,
+        revision: snapshot.revision,
+        viewport: snapshot.viewport,
+        nodes: snapshot.nodes,
+        annotations: snapshot.annotations,
+        assets,
+        generationTask: snapshot.generationTask,
+        taskParentVersionId: snapshot.taskParentVersionId,
+        workflow: snapshot.workflow
+      });
+      const recovered = await preserveCanvasConflictDraft(localProject);
+      saveConflictActiveRef.current = false;
+      setSaveConflict(null);
+      applyAuthoritativeProject(
+        recovered.currentProject,
+        `本地改动已保留为 ${recovered.conflictRelativePath}；已载入项目最新版本 R${recovered.currentProject.revision}。`
+      );
+    } catch (error) {
+      setSaveState("error");
+      setNotice(error instanceof Error ? `冲突恢复失败：${error.message}` : "冲突恢复失败");
+    } finally {
+      setRecoveringSaveConflict(false);
+    }
+  }, [applyAuthoritativeProject, recoveringSaveConflict, saveConflict, serviceState]);
 
   useEffect(() => {
     if (
@@ -2362,45 +2704,104 @@ export function App({
     setNotice("批注节点已删除；原图与其他批注未修改。");
   }, [selectedAnnotationId]);
 
-  const deleteSelectedImage = useCallback(() => {
-    if (!selectedNode) return;
+  const deleteSelectedImages = useCallback(() => {
+    const targets = selectedBatchNodes.length
+      ? selectedBatchNodes
+      : selectedNode
+        ? [selectedNode]
+        : [];
+    if (!targets.length) return;
     if (generationTask && !isTerminalStatus(generationTask.status)) {
-      setNotice("当前图片正在参与生成任务，任务完成前不能从画布移除。");
+      setNotice("当前仍有生成任务，任务完成前不能批量移除图片。");
       return;
     }
+    const removedNodeIds = new Set<string>(targets.map((node) => node.id));
+    const removedVersionIds = new Set(targets.map((node) => node.versionId));
     const workflowReferenced = viewpoints.some((viewpoint) => (
-      viewpoint.sourceVersionId === selectedNode.versionId
-      || viewpoint.selectedVersionId === selectedNode.versionId
+      [
+        viewpoint.sourceVersionId,
+        viewpoint.selectedVersionId,
+        viewpoint.preflight.d5ViewVersionId,
+        viewpoint.sceneOptimization.structureBaseVersionId,
+        viewpoint.sceneOptimization.selectedVersionId,
+        viewpoint.finalGlass.finalD5VersionId
+      ].some((versionId) => Boolean(versionId && removedVersionIds.has(versionId)))
+      || viewpoint.finalGlass.selectedVersionIds.some((versionId) => removedVersionIds.has(versionId))
+      || viewpoint.export.exportedVersionIds.some((versionId) => removedVersionIds.has(versionId))
     )) || handoffs.some((handoff) => (
-      handoff.sourceVersionId === selectedNode.versionId
-      || handoff.selectedVersionId === selectedNode.versionId
+      Boolean(handoff.sourceVersionId && removedVersionIds.has(handoff.sourceVersionId))
+      || Boolean(handoff.selectedVersionId && removedVersionIds.has(handoff.selectedVersionId))
     ));
     if (workflowReferenced) {
-      setNotice("当前图片已被视角状态或交接记录引用。请先更换该视角的底图／采用成果，历史交接记录保持不删除。");
+      setNotice("所选图片中有视角底图、采用成果、已导出成果或交接记录引用。本次未删除任何图片，请先解除这些正式引用。");
       return;
     }
-    const batchReferenced = batchRun?.styleReferenceVersionId === selectedNode.versionId
+    const batchReferenced = Boolean(batchRun?.styleReferenceVersionId
+      && removedVersionIds.has(batchRun.styleReferenceVersionId))
       || batchRun?.items.some((item) => (
-        item.sourceVersionId === selectedNode.versionId
-        || item.resultVersionIds.includes(selectedNode.versionId)
+        removedVersionIds.has(item.sourceVersionId)
+        || item.resultVersionIds.some((versionId) => removedVersionIds.has(versionId))
+        || item.attachmentVersionIds?.some((versionId) => removedVersionIds.has(versionId))
       ));
     if (batchReferenced) {
-      setNotice("当前图片已被批量记录引用。请先结束并清除当前批次，再从画布移除图片。");
+      setWorkbenchPanel("batch");
+      setNotice("所选图片中有当前批次引用。本次未删除任何图片；请先在右侧“当前批次”中清除记录，再重新批量删除。");
       return;
     }
-    const removedId = selectedNode.id;
-    const removedVersionId = selectedNode.versionId;
-    const removedName = selectedNode.name;
-    browserImageCache.delete(selectedNode.src);
-    setNodes((current) => removeImageNode(current, removedId));
+    const remainingVersionIds = new Set(
+      nodes.filter((node) => !removedNodeIds.has(node.id)).map((node) => node.versionId)
+    );
+    const cleanedWorkflow = sanitizeCanvasWorkflowReferences({
+      activeViewpointId,
+      viewpoints,
+      handoffs,
+      batchRun,
+      customGptUrl,
+      customGptEnabled,
+      textCards
+    }, remainingVersionIds);
+    const remainingSources = new Set(nodes
+      .filter((node) => !removedNodeIds.has(node.id) && node.src)
+      .map((node) => node.src));
+    for (const node of targets) {
+      restoredAssetRenditionsRef.current.delete(node.id);
+      if (!node.src || remainingSources.has(node.src)) continue;
+      browserImageCache.delete(node.src);
+      releaseCanvasAssetObjectUrl(node.src);
+      restoredAssetLoadPromisesRef.current.delete(node.assetId);
+    }
+    setNodes((current) => removeImageNodes(current, removedNodeIds));
+    setViewpoints(cleanedWorkflow.viewpoints);
+    setHandoffs(cleanedWorkflow.handoffs);
+    setTextCards(cleanedWorkflow.textCards);
+    setBatchRun(cleanedWorkflow.batchRun);
+    setBatchSourceVersionIds((current) => current.filter((versionId) => !removedVersionIds.has(versionId)));
+    setPreflightPairVersionIds((current) => Object.fromEntries(
+      Object.entries(current).filter(([sourceVersionId, pairedVersionId]) => (
+        !removedVersionIds.has(sourceVersionId as `version_${string}`)
+        && !removedVersionIds.has(pairedVersionId as `version_${string}`)
+      ))
+    ));
     setSelectedId(null);
-    setSelectedNodeIds((current) => current.filter((id) => id !== removedId));
-    setStructureBaseId((current) => current === removedId ? null : current);
-    setStyleReferenceId((current) => current === removedId ? null : current);
-    setTaskParentVersionId((current) => current === removedVersionId ? null : current);
+    setSelectedNodeIds((current) => current.filter((id) => !removedNodeIds.has(id)));
+    setStructureBaseId((current) => current && removedNodeIds.has(current) ? null : current);
+    setStyleReferenceId((current) => current && removedNodeIds.has(current) ? null : current);
+    setTaskParentVersionId((current) => current && removedVersionIds.has(current) ? null : current);
     setRevision((current) => current + 1);
-    setNotice(`“${removedName}”已从画布移除；项目原始图片文件仍保留。`);
-  }, [batchRun, generationTask, handoffs, selectedNode, viewpoints]);
+    setNotice(`已从画布批量移除 ${targets.length} 张图片；项目原始文件仍保留。`);
+  }, [
+    activeViewpointId,
+    batchRun,
+    customGptEnabled,
+    customGptUrl,
+    generationTask,
+    handoffs,
+    nodes,
+    selectedBatchNodes,
+    selectedNode,
+    textCards,
+    viewpoints
+  ]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -2481,7 +2882,7 @@ export function App({
       }
       if (action === "delete-image") {
         event.preventDefault();
-        deleteSelectedImage();
+        deleteSelectedImages();
         return;
       }
       if (action === "tool-text") setTool("text");
@@ -2496,7 +2897,7 @@ export function App({
     applyHistory,
     cancelTextEditor,
     deleteSelectedAnnotation,
-    deleteSelectedImage,
+    deleteSelectedImages,
     drawingId,
     selectedAnnotation,
     selectedAnnotationId,
@@ -2650,18 +3051,380 @@ export function App({
     }
   }, [importing, nodes, serviceState, size, viewport]);
 
+  const scanCodexProjectFolderAt = useCallback(async (sourceRoot: string) => {
+    if (!sourceRoot) {
+      setNotice("请粘贴项目文件夹绝对路径，或点击“选择文件夹”。");
+      return;
+    }
+    if (serviceState !== "connected" || scanningProjectFolder || importingProjectFolder) return;
+    setScanningProjectFolder(true);
+    setProjectFolderManifest(null);
+    setSelectedManifestPaths([]);
+    setFolderRunSourceVersionIds([]);
+    setNotice("正在只读扫描指定项目文件夹；不会移动、重命名或修改源文件…");
+    try {
+      const manifest = await scanProjectFolder(sourceRoot, projectFolderRecursive);
+      setProjectFolderManifest(manifest);
+      setSelectedManifestPaths(manifest.files.filter((file) => file.importable).map((file) => file.relativePath));
+      setNotice(
+        `扫描完成：识别 ${manifest.fileCount} 张图片，${manifest.importableCount} 张可进入画布；请核对角色后再导入。`
+      );
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "项目文件夹扫描失败");
+    } finally {
+      setScanningProjectFolder(false);
+    }
+  }, [importingProjectFolder, projectFolderRecursive, scanningProjectFolder, serviceState]);
+
+  const scanCodexProjectFolder = useCallback(async () => {
+    await scanCodexProjectFolderAt(projectFolderPath.trim());
+  }, [projectFolderPath, scanCodexProjectFolderAt]);
+
+  const chooseCodexProjectFolder = useCallback(async () => {
+    if (
+      serviceState !== "connected"
+      || selectingProjectFolder
+      || scanningProjectFolder
+      || importingProjectFolder
+    ) return;
+    setSelectingProjectFolder(true);
+    setNotice("正在打开系统文件夹选择器…");
+    try {
+      const sourceRoot = await selectProjectFolder();
+      if (!sourceRoot) {
+        setNotice("未选择文件夹；现有项目内容保持不变。");
+        return;
+      }
+      setProjectFolderPath(sourceRoot);
+      setProjectFolderManifest(null);
+      setSelectedManifestPaths([]);
+      setFolderRunSourceVersionIds([]);
+      await scanCodexProjectFolderAt(sourceRoot);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "系统文件夹选择失败");
+    } finally {
+      setSelectingProjectFolder(false);
+    }
+  }, [
+    importingProjectFolder,
+    scanCodexProjectFolderAt,
+    scanningProjectFolder,
+    selectingProjectFolder,
+    serviceState
+  ]);
+
+  const importScannedProjectFolder = useCallback(async () => {
+    if (
+      !projectFolderManifest
+      || !selectedManifestPaths.length
+      || serviceState !== "connected"
+      || importingProjectFolder
+      || scanningProjectFolder
+    ) return;
+    setImportingProjectFolder(true);
+    setNotice(`正在按已确认清单复制 ${selectedManifestPaths.length} 张图片到画布项目；源文件保持只读…`);
+    try {
+      const result = await importProjectFolderManifest(projectFolderManifest.id, selectedManifestPaths);
+      const manifestFiles = new Map(projectFolderManifest.files.map((file) => [file.relativePath, file]));
+      const existingKeys = new Set(nodes.map((node) => `${node.assetId}\n${node.name}`));
+      const displaySrcByAsset = new Map<string, string>();
+      const importedEntries: Array<{
+        node: ImageNodeState;
+        role: ProjectFolderFileRole;
+        viewpointKey: string;
+      }> = [];
+      const visibleLeft = Math.max(140, (96 - viewport.x) / viewport.scale);
+      const visibleTop = Math.max(120, (72 - viewport.y) / viewport.scale);
+      const columnX = nodes.length
+        ? Math.max(...nodes.map((node) => node.x + node.width)) + 128
+        : visibleLeft;
+      const columnY = nodes.length ? Math.min(...nodes.map((node) => node.y)) : visibleTop;
+
+      for (const item of result.items) {
+        const file = manifestFiles.get(item.relativePath);
+        if (!file || item.status === "failed" || !item.asset) continue;
+        if (existingKeys.has(`${item.asset.id}\n${file.name}`)) continue;
+        let displaySrc = displaySrcByAsset.get(item.asset.id);
+        if (!displaySrc) {
+          const originalSrc = await readCanvasAssetAsDataUrl(item.asset.id, "original");
+          if (item.asset.display) {
+            displaySrc = await readCanvasAssetAsObjectUrl(item.asset.id, "display");
+          } else {
+            const derivatives = await createImageDerivatives(originalSrc);
+            await saveCanvasAssetDerivatives(
+              item.asset.id,
+              derivatives.displayDataUrl,
+              derivatives.thumbnailDataUrl
+            );
+            displaySrc = await readCanvasAssetAsObjectUrl(item.asset.id, "display");
+          }
+          displaySrcByAsset.set(item.asset.id, displaySrc);
+        }
+        const frame = fitImportedImage(item.asset.original.width, item.asset.original.height);
+        const node: ImageNodeState = {
+          id: `node_${crypto.randomUUID()}`,
+          assetId: item.asset.id,
+          originalRelativePath: item.asset.original.relativePath,
+          versionId: `version_${crypto.randomUUID()}`,
+          origin: "imported",
+          parentVersionId: null,
+          taskId: null,
+          name: file.name,
+          src: displaySrc,
+          sourceWidth: item.asset.original.width,
+          sourceHeight: item.asset.original.height,
+          x: columnX,
+          y: columnY,
+          width: frame.width,
+          height: frame.height,
+          outputRatio: "free"
+        };
+        existingKeys.add(`${item.asset.id}\n${file.name}`);
+        importedEntries.push({ node, role: item.suggestedRole, viewpointKey: item.viewpointKey });
+      }
+
+      const placedNodes = arrangeVertically(importedEntries.map((entry) => entry.node), { x: columnX, y: columnY }, 96);
+      const placedById = new Map(placedNodes.map((node) => [node.id, node]));
+      const placedEntries = importedEntries.map((entry) => ({ ...entry, node: placedById.get(entry.node.id) ?? entry.node }));
+      if (placedNodes.length) {
+        setNodes((current) => [...current, ...placedNodes]);
+        setSelectedId(placedNodes[0]?.id ?? null);
+        setSelectedNodeIds(placedNodes[0] ? [placedNodes[0].id] : []);
+        setSelectedAnnotationId(null);
+        setViewport(fitRect(size, placedNodes[0] ?? { x: columnX, y: columnY, width: 1, height: 1 }, 72));
+      }
+
+      const suByViewpoint = new Map(
+        placedEntries
+          .filter((entry) => entry.role === "su-reference")
+          .map((entry) => [entry.viewpointKey, entry.node] as const)
+      );
+      const d5Entries = placedEntries.filter((entry) => entry.role === "d5-view");
+      if (d5Entries.length) {
+        const newViewpoints = d5Entries.map((entry) => {
+          const card = createViewpointStatusCard({
+            name: entry.viewpointKey,
+            stage: bulkStage,
+            sourceVersionId: entry.node.versionId
+          });
+          const su = suByViewpoint.get(entry.viewpointKey);
+          return su
+            ? {
+              ...card,
+              preflight: { ...card.preflight, suReferenceVersionId: su.versionId }
+            }
+            : card;
+        });
+        setViewpoints((current) => [...current, ...newViewpoints]);
+        setActiveViewpointId(newViewpoints[0]?.id ?? null);
+      }
+      const importedD5Keys = new Set(result.items.flatMap((item) => {
+        const file = manifestFiles.get(item.relativePath);
+        return file?.suggestedRole === "d5-view" && item.status !== "failed" && item.asset
+          ? [`${item.asset.id}\n${file.name}`]
+          : [];
+      }));
+      const folderD5VersionIds = [...nodes, ...placedNodes]
+        .filter((node) => importedD5Keys.has(`${node.assetId}\n${node.name}`))
+        .map((node) => node.versionId);
+      setFolderRunSourceVersionIds(folderD5VersionIds);
+      if (folderD5VersionIds.length) setBatchSourceVersionIds(folderD5VersionIds);
+      const styleEntry = placedEntries.find((entry) => entry.role === "style-reference");
+      if (styleEntry) setStyleReferenceId(styleEntry.node.id);
+      if (placedNodes.length) setRevision((current) => current + placedNodes.length);
+
+      const failed = result.items.filter((item) => item.status === "failed").length;
+      const ignored = projectFolderManifest.files.filter((file) => !file.importable).length;
+      setNotice(
+        placedNodes.length
+          ? `清单导入完成：新增 ${placedNodes.length} 个画布节点，建立 ${d5Entries.length} 个视角；${ignored ? `忽略 ${ignored} 张通道或超限图片；` : ""}${failed ? `${failed} 项失败，已保留成功项。` : "源文件未修改。"}`
+          : failed
+            ? `清单导入未新增节点，${failed} 项失败；请重新扫描。`
+            : "所选图片已在画布中，不重复建立节点。"
+      );
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "项目文件夹清单导入失败");
+    } finally {
+      setImportingProjectFolder(false);
+    }
+  }, [
+    bulkStage,
+    importingProjectFolder,
+    nodes,
+    projectFolderManifest,
+    scanningProjectFolder,
+    selectedManifestPaths,
+    serviceState,
+    size,
+    viewport
+  ]);
+
+  const createAuthorizedCodexRun = useCallback(async () => {
+    if (
+      serviceState !== "connected"
+      || creatingCodexRun
+      || (codexStartSource === "folder" && !projectFolderManifest)
+      || !codexAuthorizationConfirmed
+      || bulkStage === "completed"
+      || !codexRunSources.length
+    ) return;
+    const isGeneration = codexAutomationPlan.action === "generate";
+    if ((!isGeneration && codexMaximumGenerations !== 0) || (isGeneration && codexMaximumGenerations < codexRunSources.length)) {
+      setNotice(isGeneration
+        ? `生成上限不能少于本批次 ${codexRunSources.length} 个任务项。`
+        : "分析／提示词批次的生成上限必须为 0。");
+      return;
+    }
+    setCreatingCodexRun(true);
+    setNotice("正在保存当前画布并建立 Codex 自动运行授权批次…");
+    try {
+      const authorizedManifest = codexStartSource === "folder" ? projectFolderManifest : null;
+      saveRequestedRef.current = true;
+      if (!(await saveProjectNow())) throw new Error("当前画布尚未安全保存，未创建 Codex 批次");
+      const result = await createCodexCanvasRun({
+        authorizationId: `authorization_${crypto.randomUUID()}`,
+        ...(authorizedManifest ? { manifestId: authorizedManifest.id } : {}),
+        sourceFolder: authorizedManifest?.sourceRoot ?? null,
+        stage: bulkStage,
+        action: codexAutomationPlan.action,
+        sourceVersionIds: codexRunSources.map((node) => node.versionId),
+        styleReferenceVersionId: styleReference?.versionId ?? null,
+        prompt: taskInstruction,
+        maximumGenerations: codexMaximumGenerations,
+        allowManualFallback: codexAllowManualFallback,
+        stopOnStructureRisk: codexStopOnStructureRisk,
+        approvedAt: new Date().toISOString(),
+        confirmed: true
+      });
+      setBatchRun(result.run);
+      setBatchSourceVersionIds(result.run.items.map((item) => item.sourceVersionId));
+      setRevision(result.project.revision);
+      lastSavedRevisionRef.current = Math.max(lastSavedRevisionRef.current, result.project.revision);
+      setCodexAuthorizationConfirmed(false);
+      const totalLimit = result.run.authorization?.maximumGenerations ?? 0;
+      const perItemLimit = result.run.items.length ? Math.floor(totalLimit / result.run.items.length) : 0;
+      setNotice(`Codex 自动运行批次已建立：${result.run.items.length} 项，自动动作“${codexAutomationPlan.label}”，每张底图至少 ${perItemLimit} 次、总计 ${totalLimit} 次生成额度；结构风险候选将保留并自动补生。`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Codex 自动运行授权批次创建失败");
+    } finally {
+      setCreatingCodexRun(false);
+    }
+  }, [
+    bulkStage,
+    codexAllowManualFallback,
+    codexAutomationPlan.action,
+    codexAutomationPlan.label,
+    codexAuthorizationConfirmed,
+    codexMaximumGenerations,
+    codexRunSources,
+    codexStopOnStructureRisk,
+    codexStartSource,
+    creatingCodexRun,
+    projectFolderManifest,
+    saveProjectNow,
+    serviceState,
+    styleReference,
+    taskInstruction
+  ]);
+
+  const transitionVisibleCodexRun = useCallback(async (action: "pause" | "resume") => {
+    if (!batchRun || batchRun.runner !== "codex" || creatingCodexRun) return;
+    setCreatingCodexRun(true);
+    try {
+      const result = await transitionCodexCanvasRun(batchRun.id, action);
+      setBatchRun(result.run);
+      setRevision(result.project.revision);
+      lastSavedRevisionRef.current = Math.max(lastSavedRevisionRef.current, result.project.revision);
+      setNotice(action === "pause"
+        ? "Codex 自动运行已在安全检查点暂停；不会静默切换执行通道。"
+        : "Codex 自动运行已恢复，只处理尚未完成的任务项。");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Codex 批次状态更新失败");
+    } finally {
+      setCreatingCodexRun(false);
+    }
+  }, [batchRun, creatingCodexRun]);
+
+  const handoffVisibleRun = useCallback(async (targetRunner: WorkflowRunnerKind) => {
+    if (!batchRun || batchRun.status !== "paused" || creatingCodexRun) return;
+    if (targetRunner === "manual" && batchRun.authorization?.allowManualFallback !== true) {
+      setNotice("当前授权单未允许切换到浏览器人工批量；请重新建立授权或继续 Codex 自动运行。");
+      return;
+    }
+    setCreatingCodexRun(true);
+    try {
+      saveRequestedRef.current = true;
+      if (!(await saveProjectNow())) throw new Error("暂停状态尚未安全保存，未执行通道切换");
+      const result = await handoffCanvasRun(
+        batchRun.id,
+        targetRunner,
+        targetRunner === "manual" ? "用户确认由浏览器人工批量接管未完成项" : "用户确认由 Codex 自动运行恢复未完成项"
+      );
+      setBatchRun(result.run);
+      setExecutionMode(targetRunner === "manual" ? "manual" : "codex");
+      setRevision(result.project.revision);
+      lastSavedRevisionRef.current = Math.max(lastSavedRevisionRef.current, result.project.revision);
+      setNotice(targetRunner === "manual"
+        ? "未完成项已交给浏览器人工批量；已完成项和已登记结果保持不变。"
+        : "未完成项已交给 Codex 自动运行；Codex 将从现有检查点继续。");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "执行通道切换失败");
+    } finally {
+      setCreatingCodexRun(false);
+    }
+  }, [batchRun, creatingCodexRun, saveProjectNow]);
+
   const setOutputRatio = useCallback((ratio: OutputRatio) => {
     if (!selectedNode) return;
     updateNode(applyOutputRatio(selectedNode, ratio));
   }, [selectedNode, updateNode]);
 
-  const tidyFrames = useCallback(() => {
-    if (!nodes.length) return;
-    const reference = selectedNode ?? nodes[0];
-    setNodes((current) => normalizeImageFrames(current, reference?.id));
+  const autoArrangeCanvas = useCallback(() => {
+    if (nodes.length + textCards.length < 2) return;
+    const selectedObjectCount = selectedNodeIds.length + selectedTextCardIds.length;
+    const sourceVersionId = taskParentVersionId
+      ?? (structureBase?.versionId ?? null);
+    const source = sourceVersionId ? nodeIndex.byVersionId.get(sourceVersionId) ?? null : null;
+    const hasReturnedNode = generationTask
+      ? nodes.some((node) => node.taskId === generationTask.id)
+      : false;
+    const reserveGeneratingResult = Boolean(
+      generationTask
+      && source
+      && shouldShowImageGenerationPlaceholder(
+        generationTask.status,
+        responseModeOf(generationTask),
+        generationTask.results.length,
+        hasReturnedNode
+      )
+    );
+    const result = autoArrangeCanvasObjects(nodes, textCards, {
+      ...(selectedObjectCount > 1
+        ? { nodeIds: selectedNodeIds, textCardIds: selectedTextCardIds }
+        : {}),
+      ...(reserveGeneratingResult && source
+        ? { reservations: [{ sourceVersionId: source.versionId, width: source.width, height: source.height }] }
+        : {})
+    });
+    setNodes(result.nodes);
+    setTextCards(result.textCards);
     setRevision((current) => current + 1);
-    setNotice(`已按“${reference?.name ?? "第一张图片"}”的高度整理 ${nodes.length} 张图片；宽度按各自原始比例自适应，图片内容完整保留。`);
-  }, [nodes, selectedNode]);
+    setViewport(fitRect(size, result.bounds, 72));
+    const arrangedCount = result.arrangedNodeIds.length + result.arrangedTextCardIds.length;
+    setNotice(selectedObjectCount > 1
+      ? `已自动排版 ${arrangedCount} 个框选对象；图片尺寸保持不变，未选对象未移动。`
+      : `已自动排版整个画布的 ${arrangedCount} 个对象；图片尺寸保持不变，文字卡、父图和生成结果已分列。`);
+  }, [
+    generationTask,
+    nodeIndex,
+    nodes,
+    selectedNodeIds,
+    selectedTextCardIds,
+    size,
+    structureBase,
+    taskParentVersionId,
+    textCards
+  ]);
 
   const arrangeImportedColumn = useCallback(() => {
     const selectedSet = new Set(selectedNodeIds);
@@ -2698,6 +3461,31 @@ export function App({
   const changeBulkStage = useCallback((stage: WorkflowStage) => {
     setBulkStage(stage);
     setWorkflowAction(defaultWorkflowAction(stage));
+  }, []);
+
+  const dismissTaskStart = useCallback(() => {
+    setTaskStartDismissed(true);
+    try {
+      window.localStorage.setItem(TASK_START_DISMISSED_STORAGE_KEY, "1");
+    } catch {
+      // Dismissal remains active for the current session.
+    }
+  }, []);
+
+  const startTaskAtStage = useCallback((stage: Exclude<WorkflowStage, "completed">) => {
+    changeBulkStage(stage);
+    dismissTaskStart();
+    setNotice(`${WORKFLOW_STAGE_LABELS[stage]}已就绪；请选择本阶段输入图片。`);
+    window.requestAnimationFrame(() => imageInputRef.current?.click());
+  }, [changeBulkStage, dismissTaskStart]);
+
+  const changeUtilityPanelWidth = useCallback((width: UtilityPanelWidth) => {
+    setUtilityPanelWidth(width);
+    try {
+      window.localStorage.setItem(UTILITY_PANEL_WIDTH_STORAGE_KEY, width);
+    } catch {
+      // The chosen width remains active for the current session.
+    }
   }, []);
 
   const updateTextCard = useCallback((id: CanvasTextCard["id"], patch: Partial<CanvasTextCard>) => {
@@ -2751,7 +3539,7 @@ export function App({
     const content = extractFinalPrompt(text).trim();
     const optimizer = fixedWorkflowPromptById("fixed_prompt_optimizer");
     if (!content || !optimizer) {
-      setNotice("当前提示词无法进入 02C 优化。");
+      setNotice("当前提示词无法进入优化阶段的继续优化动作。");
       return;
     }
     const source = card.sourceVersionId ? nodeIndex.byVersionId.get(card.sourceVersionId) ?? null : null;
@@ -2768,7 +3556,7 @@ export function App({
       setContextInputFocusRequested(true);
     }
     setTaskInstruction(buildPromptOptimizerInput(content, optimizer.content));
-    setPromptTitle(`${textCardDisplayTitle(card.title)}｜02C优化`);
+    setPromptTitle(`${textCardDisplayTitle(card.title)}｜继续优化`);
     setBulkStage("scene-optimization");
     setWorkflowAction("prompt");
     setSelectedFixedPromptId(optimizer.id);
@@ -2779,7 +3567,7 @@ export function App({
       ? { ...item, handoffState: "loaded", updatedAt: new Date().toISOString() }
       : item));
     setRevision((current) => current + 1);
-    setNotice("已基于当前提示词建立 02C 优化输入；发送后会生成新的结果卡，不覆盖原 02B 卡。");
+    setNotice("已基于当前提示词建立继续优化输入；发送后会生成新的结果卡，不覆盖原提示词卡。");
   }, [nodeIndex]);
 
   const copyTextCardContent = useCallback(async (text: string) => {
@@ -2959,6 +3747,155 @@ export function App({
     }));
     setRevision((current) => current + 1);
   }, [activeViewpointId]);
+
+  const activateViewpointTask = useCallback((viewpointId: `viewpoint_${string}`) => {
+    const viewpoint = viewpoints.find((item) => item.id === viewpointId);
+    if (!viewpoint) return;
+    setActiveViewpointId(viewpointId);
+    const sourceVersionId = viewpoint.finalGlass.finalD5VersionId
+      ?? viewpoint.sceneOptimization.structureBaseVersionId
+      ?? viewpoint.preflight.d5ViewVersionId
+      ?? viewpoint.sourceVersionId;
+    const sourceNode = sourceVersionId ? nodeIndex.byVersionId.get(sourceVersionId) ?? null : null;
+    if (sourceNode) {
+      setSelectedId(sourceNode.id);
+      setSelectedNodeIds([sourceNode.id]);
+      setSelectedTextCardId(null);
+      setSelectedTextCardIds([]);
+      setSelectedAnnotationId(null);
+    }
+    setRevision((current) => current + 1);
+  }, [nodeIndex, viewpoints]);
+
+  const focusCandidateVersion = useCallback((versionId: `version_${string}`) => {
+    const node = nodeIndex.byVersionId.get(versionId);
+    if (!node) {
+      setNotice("候选版本仍有记录，但对应画布节点已经移除。");
+      return;
+    }
+    setSelectedId(node.id);
+    setSelectedNodeIds([node.id]);
+    setSelectedTextCardId(null);
+    setSelectedTextCardIds([]);
+    setSelectedAnnotationId(null);
+    setViewport(fitRect(size, node, 72));
+  }, [nodeIndex, size]);
+
+  const patchCandidateReview = useCallback((
+    viewpointId: `viewpoint_${string}`,
+    versionId: `version_${string}`,
+    patch: Partial<ViewpointStatusCard["candidateReviews"][number]>
+  ) => {
+    setViewpoints((current) => current.map((viewpoint) => {
+      if (viewpoint.id !== viewpointId) return viewpoint;
+      const stage = viewpoint.finalGlass.candidateVersionIds.includes(versionId) ? "final-glass" : "scene-optimization";
+      return {
+        ...viewpoint,
+        candidateReviews: updateCandidateReviewRecord(
+          viewpoint.candidateReviews,
+          versionId,
+          stage,
+          (review) => ({ ...review, ...patch })
+        ),
+        updatedAt: new Date().toISOString()
+      };
+    }));
+    setRevision((current) => current + 1);
+  }, []);
+
+  const approveCandidate = useCallback((viewpointId: `viewpoint_${string}`, versionId: `version_${string}`) => {
+    const targetViewpoint = viewpoints.find((viewpoint) => viewpoint.id === viewpointId);
+    const targetReview = targetViewpoint?.candidateReviews.find((review) => review.versionId === versionId) ?? null;
+    if (!targetReview || !candidateReviewComplete(targetReview)) {
+      setNotice("五项验收必须全部通过后才能采用；结构风险提示不会替代人工判断。");
+      return;
+    }
+    setViewpoints((current) => current.map((viewpoint) => {
+      if (viewpoint.id !== viewpointId) return viewpoint;
+      const stage = viewpoint.finalGlass.candidateVersionIds.includes(versionId) ? "final-glass" : "scene-optimization";
+      const candidateReviews = updateCandidateReviewRecord(
+        viewpoint.candidateReviews,
+        versionId,
+        stage,
+        (review) => ({ ...review, decision: "approved" })
+      );
+      if (stage === "final-glass") {
+        const selectedVersionIds = viewpoint.finalGlass.selectedVersionIds.includes(versionId)
+          ? viewpoint.finalGlass.selectedVersionIds
+          : [...viewpoint.finalGlass.selectedVersionIds, versionId];
+        return {
+          ...viewpoint,
+          status: "locked",
+          selectedVersionId: versionId,
+          candidateReviews,
+          finalGlass: {
+            ...viewpoint.finalGlass,
+            selectedVersionIds,
+            validation: "passed",
+            status: "selected"
+          },
+          updatedAt: new Date().toISOString()
+        };
+      }
+      return {
+        ...viewpoint,
+        status: "locked",
+        selectedVersionId: versionId,
+        candidateReviews,
+        sceneOptimization: {
+          ...viewpoint.sceneOptimization,
+          selectedVersionId: versionId,
+          status: "selected"
+        },
+        updatedAt: new Date().toISOString()
+      };
+    }));
+    setRevision((current) => current + 1);
+    setNotice("候选五项验收已通过并标记采用；原图和其他候选仍完整保留。");
+  }, [viewpoints]);
+
+  const rejectCandidate = useCallback((viewpointId: `viewpoint_${string}`, versionId: `version_${string}`) => {
+    setViewpoints((current) => current.map((viewpoint) => {
+      if (viewpoint.id !== viewpointId) return viewpoint;
+      const stage = viewpoint.finalGlass.candidateVersionIds.includes(versionId) ? "final-glass" : "scene-optimization";
+      const candidateReviews = updateCandidateReviewRecord(
+        viewpoint.candidateReviews,
+        versionId,
+        stage,
+        (review) => ({ ...review, decision: "rejected" })
+      );
+      if (stage === "final-glass") {
+        const selectedVersionIds = viewpoint.finalGlass.selectedVersionIds.filter((id) => id !== versionId);
+        return {
+          ...viewpoint,
+          status: "rework",
+          selectedVersionId: viewpoint.selectedVersionId === versionId ? selectedVersionIds.at(-1) ?? null : viewpoint.selectedVersionId,
+          candidateReviews,
+          finalGlass: {
+            ...viewpoint.finalGlass,
+            selectedVersionIds,
+            validation: selectedVersionIds.length ? viewpoint.finalGlass.validation : "pending",
+            status: selectedVersionIds.length ? "selected" : "generated"
+          },
+          updatedAt: new Date().toISOString()
+        };
+      }
+      return {
+        ...viewpoint,
+        status: "rework",
+        selectedVersionId: viewpoint.selectedVersionId === versionId ? null : viewpoint.selectedVersionId,
+        candidateReviews,
+        sceneOptimization: {
+          ...viewpoint.sceneOptimization,
+          selectedVersionId: viewpoint.sceneOptimization.selectedVersionId === versionId ? null : viewpoint.sceneOptimization.selectedVersionId,
+          status: viewpoint.sceneOptimization.selectedVersionId === versionId ? "generated" : viewpoint.sceneOptimization.status
+        },
+        updatedAt: new Date().toISOString()
+      };
+    }));
+    setRevision((current) => current + 1);
+    setNotice("候选已拒绝并保留在画布与验收记录中；可继续比较或补生。");
+  }, []);
 
   const applyStageToNodes = useCallback((sources: readonly ImageNodeState[], stage: WorkflowStage, announce = true) => {
     if (!sources.length) return;
@@ -3246,6 +4183,10 @@ export function App({
     if (adoptingToProject) return;
     setAdoptingToProject(true);
     try {
+      saveRequestedRef.current = true;
+      if (!(await saveProjectNow())) {
+        throw new Error("最终选定状态尚未安全保存，未执行导出");
+      }
       const result = await exportFinalGlassSelections(selections);
       const successful = new Map(result.records
         .filter((record) => record.status !== "failed")
@@ -3288,6 +4229,7 @@ export function App({
     adoptingToProject,
     deliveryTarget,
     finalGlassExportPreview,
+    saveProjectNow,
     viewpoints
   ]);
 
@@ -3613,7 +4555,8 @@ export function App({
 
   useEffect(() => {
     if (
-      batchRun?.status !== "running"
+      !browserAutomationOwnsBatch(batchRun)
+      || batchRun?.status !== "running"
       || !automationReady
       || generationActive
       || creatingTask
@@ -3625,7 +4568,7 @@ export function App({
   }, [automationReady, batchRun, creatingTask, generationActive, returningResults, startBatchItem]);
 
   useEffect(() => {
-    if (!projectLoaded || serviceState !== "connected" || !batchRun) return;
+    if (!projectLoaded || serviceState !== "connected" || !batchRun || !browserAutomationOwnsBatch(batchRun)) return;
     const runningItem = batchRun.items.find((item) => item.status === "running");
     if (!runningItem || generationTask?.id === runningItem.taskId) return;
     setBatchRun((current) => current ? {
@@ -4071,13 +5014,57 @@ export function App({
       .map((node) => node.id));
   }, [nodes, size.height, size.width, viewport]);
 
+  useEffect(() => {
+    if (!projectLoaded || serviceState !== "connected") return;
+    const comparisonNodeIds = new Set(comparisonVersionIds.flatMap((versionId) => {
+      const node = nodeIndex.byVersionId.get(versionId);
+      return node ? [node.id] : [];
+    }));
+    const targets = nodes.filter((node) => (
+      !node.src
+      && (selectedId === node.id || visibleImageNodeIds.has(node.id) || comparisonNodeIds.has(node.id))
+    ));
+    for (const target of targets) {
+      const metadata = restoredAssetRenditionsRef.current.get(target.id);
+      if (!metadata) continue;
+      let pending = restoredAssetLoadPromisesRef.current.get(metadata.assetId);
+      if (!pending) {
+        pending = restoredAssetLoadQueueRef.current.run(() => (
+          readCanvasAssetAsObjectUrl(metadata.assetId, metadata.rendition)
+        ));
+        restoredAssetLoadPromisesRef.current.set(metadata.assetId, pending);
+      }
+      void pending.then((src) => {
+        if (!assetLoadingActiveRef.current) {
+          releaseCanvasAssetObjectUrl(src);
+          return;
+        }
+        setNodes((current) => current.map((node) => (
+          node.assetId === metadata.assetId && !node.src ? { ...node, src } : node
+        )));
+      }).catch(() => {
+        restoredAssetLoadPromisesRef.current.delete(metadata.assetId);
+      });
+    }
+  }, [comparisonVersionIds, nodeIndex, nodes, projectLoaded, selectedId, serviceState, visibleImageNodeIds]);
+
+  const renderedImageNodes = useMemo(() => {
+    const retainedIds = new Set([
+      selectedId,
+      structureBaseId,
+      styleReferenceId,
+      ...selectedNodeIds
+    ].filter((id): id is string => Boolean(id)));
+    return nodes.filter((node) => visibleImageNodeIds.has(node.id) || retainedIds.has(node.id));
+  }, [nodes, selectedId, selectedNodeIds, structureBaseId, styleReferenceId, visibleImageNodeIds]);
+
   const canvasObjectGroups = useMemo<CanvasObjectGroup[]>(() => [
     {
       label: "图片",
       options: nodes.map((node, index) => ({
         kind: "image" as const,
         id: node.id,
-        label: `${index + 1}. ${node.name}`
+        label: businessCanvasNodeLabel(node, viewpointTasks, index)
       }))
     },
     {
@@ -4096,7 +5083,7 @@ export function App({
         label: `${index + 1}. ${annotationTypeLabel(annotation.type)}${annotation.comment ? ` · ${annotation.comment}` : ""}`
       }))
     }
-  ], [annotations, nodes, textCards]);
+  ], [annotations, nodes, textCards, viewpointTasks]);
   const selectedCanvasObjectValue = selectedAnnotationId
     ? encodeCanvasObjectValue("annotation", selectedAnnotationId)
     : selectedTextCardId
@@ -4145,7 +5132,13 @@ export function App({
   }, [annotations, nodeIndex, textCards]);
 
   return (
-    <div className="app-shell">
+    <div
+      className="app-shell"
+      data-utility-panel-width={utilityPanelWidth}
+      style={({
+        "--utility-panel-width": utilityPanelWidth === "compact" ? "44rem" : utilityPanelWidth === "wide" ? "68rem" : "55rem"
+      } as CSSProperties)}
+    >
       <a className="skip-link" href="#canvas-main">跳到画布</a>
 
       <aside className="tool-rail" aria-label="画布工具">
@@ -4196,7 +5189,12 @@ export function App({
             onClick={() => folderInputRef.current?.click()}
           />
           <RailCommandButton glyph="↕" label="纵排" disabled={nodes.length < 2} onClick={arrangeImportedColumn} />
-          <RailCommandButton glyph="□" label="整理" disabled={nodes.length < 2} onClick={tidyFrames} />
+          <RailCommandButton
+            glyph="▦"
+            label="自动排版"
+            disabled={nodes.length + textCards.length < 2}
+            onClick={autoArrangeCanvas}
+          />
           <RailCommandButton glyph="↶" label="撤销" disabled={!canUndo} onClick={() => applyHistory(-1)} />
           <RailCommandButton glyph="↷" label="重做" disabled={!canRedo} onClick={() => applyHistory(1)} />
         </div>
@@ -4230,6 +5228,9 @@ export function App({
           void importFiles(Array.from(event.dataTransfer.files));
         }}
       >
+        {shouldShowTaskStart(projectLoaded, nodes.length, taskStartDismissed) && (
+          <TaskStartLauncher onStart={startTaskAtStage} onDismiss={dismissTaskStart} />
+        )}
         <CanvasObjectNavigator
           value={selectedCanvasObjectValue}
           groups={canvasObjectGroups}
@@ -4305,7 +5306,7 @@ export function App({
                 <Text x={72} y={232} width={560} text="支持 PNG、JPEG、WebP，单张不超过 40 MiB。\n原图复制后只读保存，画布操作不会覆盖源文件。" fontFamily="Microsoft YaHei UI" fontSize={17} lineHeight={1.8} fill="#666666" />
               </Group>
             )}
-            {nodes.map((node) => (
+            {renderedImageNodes.map((node) => (
               <CanvasImageNode
                 key={node.id}
                 node={node}
@@ -4892,6 +5893,32 @@ export function App({
           </form>
         )}
 
+        {saveConflict && (
+          <section className="save-conflict-panel" role="alertdialog" aria-labelledby="save-conflict-title" aria-describedby="save-conflict-description">
+            <header>
+              <span>
+                <small>VERSION CONFLICT</small>
+                <strong id="save-conflict-title">项目在另一处发生更新</strong>
+              </span>
+              <em>{saveConflict.sourceLabel}</em>
+            </header>
+            <p id="save-conflict-description">
+              当前画布的本地改动仍在内存中，自动保存已经暂停。系统可以先把本地状态保存成可恢复冲突副本，再载入权威版本；不会覆盖任何一方。
+            </p>
+            <dl>
+              <div><dt>当前画布</dt><dd>R{saveConflict.localProject.revision}</dd></div>
+              <div><dt>项目最新</dt><dd>R{saveConflict.remoteProject.revision}</dd></div>
+              <div><dt>更新时间</dt><dd>{new Date(saveConflict.remoteProject.updatedAt).toLocaleString("zh-CN", { hour12: false })}</dd></div>
+            </dl>
+            <footer>
+              <small>{saveConflict.message}</small>
+              <button type="button" autoFocus disabled={recoveringSaveConflict} onClick={() => void recoverSaveConflict()}>
+                {recoveringSaveConflict ? "正在保留并同步…" : "保留本地草稿并载入最新"}
+              </button>
+            </footer>
+          </section>
+        )}
+
         <div
           id="canvas-status"
           className="canvas-notice"
@@ -4982,6 +6009,352 @@ export function App({
             </div>
             <span>{viewpoints.length} 个视角</span>
           </div>
+
+          <section className="execution-mode-panel" data-mode={executionMode} aria-label="工作流执行方式">
+            <header>
+              <span>
+                <small>EXECUTION LAYER</small>
+                <strong>同一工作流，两种执行方式</strong>
+              </span>
+              <em>{executionMode === "manual" ? "浏览器人工批量" : "Codex 自动运行"}</em>
+            </header>
+            <div className="execution-mode-switch" role="radiogroup" aria-label="选择工作流执行方式">
+              <button
+                type="button"
+                role="radio"
+                aria-checked={executionMode === "manual"}
+                data-active={executionMode === "manual"}
+                onClick={() => {
+                  setExecutionMode("manual");
+                  setNotice("已切换到浏览器人工批量：由设计师确认提交，系统继续负责批量队列、回收和排版。");
+                }}
+              >
+                <b>A</b>
+                <span><strong>浏览器人工批量</strong><small>由设计师确认每次提交</small></span>
+              </button>
+              <button
+                type="button"
+                role="radio"
+                aria-checked={executionMode === "codex"}
+                data-active={executionMode === "codex"}
+                onClick={() => {
+                  setExecutionMode("codex");
+                  setNotice("已切换到 Codex 自动运行：可直接使用当前画布图片，也可从项目文件夹导入新批次。");
+                }}
+              >
+                <b>B</b>
+                <span><strong>Codex 自动运行</strong><small>按授权范围批量运行</small></span>
+              </button>
+            </div>
+
+            {executionMode === "manual" ? (
+              <p className="execution-mode-note">两个执行通道共用当前框选、独立阶段与严格串行队列；切换通道不会重复已完成项。</p>
+            ) : (
+              <div className="codex-folder-intake">
+                <div className="codex-capability-strip" data-ready={Boolean(codexCapabilities) || undefined}>
+                  <span aria-hidden="true">{codexCapabilities ? "✓" : checkingCodexCapabilities ? "…" : "!"}</span>
+                  <p>
+                    <strong>{codexCapabilities ? "本地 MCP 领域能力已就绪" : checkingCodexCapabilities ? "正在检查 Codex 能力" : "等待能力检查"}</strong>
+                    <small>{codexCapabilities
+                      ? `Bridge ${codexCapabilities.bridgeVersion} · ${codexCapabilities.supportedTools.length} 个受限工具 · 禁止自动最终选图`
+                      : "Codex 自动运行只通过本地桥接读写项目，不直接修改项目 JSON。"}</small>
+                  </p>
+                </div>
+                <div className="codex-start-source-switch" role="radiogroup" aria-label="选择 Codex 自动运行启动来源">
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={codexStartSource === "canvas"}
+                    data-active={codexStartSource === "canvas"}
+                    onClick={() => {
+                      setCodexStartSource("canvas");
+                      setCodexAuthorizationConfirmed(false);
+                      setNotice("Codex 自动运行将直接使用当前画布：当前框选优先，没有框选时使用已登记的 D5／导入图。");
+                    }}
+                  >
+                    <strong>当前画布</strong>
+                    <small>直接使用已导入图片</small>
+                  </button>
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={codexStartSource === "folder"}
+                    data-active={codexStartSource === "folder"}
+                    onClick={() => {
+                      setCodexStartSource("folder");
+                      setCodexAuthorizationConfirmed(false);
+                      setNotice("Codex 自动运行将从项目文件夹建立只读清单；导入后再建立授权批次。");
+                    }}
+                  >
+                    <strong>项目文件夹</strong>
+                    <small>扫描并导入新图片</small>
+                  </button>
+                </div>
+
+                {codexStartSource === "canvas" ? (
+                  <section className="codex-canvas-source" data-empty={!codexRunSources.length || undefined}>
+                    <header>
+                      <span>
+                        <small>CANVAS INPUT</small>
+                        <strong>{codexRunSources.length ? `${codexCanvasSourceLabel}已就绪` : "当前画布暂无可用底图"}</strong>
+                      </span>
+                      <em>{codexRunSources.length} 张</em>
+                    </header>
+                    {codexRunSources.length ? (
+                      <>
+                        <p>框选图片会实时替换本批范围；没有框选时，自动使用画布中已登记的 D5 视角。</p>
+                        <ul>
+                          {codexRunSources.slice(0, 5).map((node, index) => (
+                            <li key={node.versionId}><span>{String(index + 1).padStart(2, "0")}</span><strong>{node.name}</strong></li>
+                          ))}
+                          {codexRunSources.length > 5 && <li><span>＋</span><strong>另有 {codexRunSources.length - 5} 张</strong></li>}
+                        </ul>
+                      </>
+                    ) : (
+                      <p>请在画布中单击一张图片，或使用“批选”框选多张；也可以切换到“项目文件夹”导入新批次。</p>
+                    )}
+                  </section>
+                ) : (
+                  <>
+                <div className="codex-folder-source">
+                  <div className="codex-folder-source-header">
+                    <span>
+                      <strong>项目文件夹</strong>
+                      <small>粘贴绝对路径，或从系统中直接选择</small>
+                    </span>
+                    <button
+                      type="button"
+                      className="codex-folder-pick-button"
+                      disabled={
+                        serviceState !== "connected"
+                        || selectingProjectFolder
+                        || scanningProjectFolder
+                        || importingProjectFolder
+                        || Boolean(batchRun && batchRun.status !== "completed")
+                      }
+                      onClick={() => void chooseCodexProjectFolder()}
+                    >{selectingProjectFolder ? "选择中…" : "选择文件夹"}</button>
+                  </div>
+                  <label>
+                    <span>绝对路径</span>
+                    <input
+                      value={projectFolderPath}
+                      placeholder="例如 D:\\项目\\产业园\\01投标阶段\\效果图\\D5_01"
+                      disabled={selectingProjectFolder || scanningProjectFolder || importingProjectFolder}
+                      onChange={(event) => {
+                        setProjectFolderPath(event.target.value);
+                        setProjectFolderManifest(null);
+                        setSelectedManifestPaths([]);
+                        setFolderRunSourceVersionIds([]);
+                      }}
+                    />
+                  </label>
+                  <p>选择文件夹后会自动只读扫描；粘贴路径后点击下方“只读扫描”。</p>
+                </div>
+                <div className="codex-folder-options">
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={projectFolderRecursive}
+                      disabled={selectingProjectFolder || scanningProjectFolder || importingProjectFolder}
+                      onChange={(event) => setProjectFolderRecursive(event.target.checked)}
+                    />
+                    <span>包含子文件夹</span>
+                  </label>
+                  <button
+                    type="button"
+                    disabled={
+                      serviceState !== "connected"
+                      || !projectFolderPath.trim()
+                      || selectingProjectFolder
+                      || scanningProjectFolder
+                      || importingProjectFolder
+                      || Boolean(batchRun && batchRun.status !== "completed")
+                    }
+                    onClick={() => void scanCodexProjectFolder()}
+                  >{scanningProjectFolder ? "扫描中…" : "只读扫描"}</button>
+                </div>
+
+                {projectFolderManifest && (
+                  <div className="folder-manifest-preview">
+                    <header>
+                      <span>
+                        <strong>{projectFolderManifest.importableCount} / {projectFolderManifest.fileCount} 张可导入</strong>
+                        <small>清单 {projectFolderManifest.id.replace("manifest_", "").slice(0, 8)}</small>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedManifestPaths(
+                          selectedManifestPaths.length
+                            ? []
+                            : projectFolderManifest.files.filter((file) => file.importable).map((file) => file.relativePath)
+                        )}
+                      >{selectedManifestPaths.length ? "清空" : "全选可导入"}</button>
+                    </header>
+                    <ul>
+                      {projectFolderManifest.files.slice(0, 40).map((file) => (
+                        <li key={file.relativePath} data-importable={file.importable || undefined}>
+                          <label title={file.reason || file.relativePath}>
+                            <input
+                              type="checkbox"
+                              disabled={!file.importable || importingProjectFolder}
+                              checked={selectedManifestPaths.includes(file.relativePath)}
+                              onChange={(event) => setSelectedManifestPaths((current) => event.target.checked
+                                ? [...current, file.relativePath]
+                                : current.filter((path) => path !== file.relativePath))}
+                            />
+                            <span>
+                              <strong>{file.name}</strong>
+                              <small>{PROJECT_FOLDER_ROLE_LABELS[file.suggestedRole]} · {(file.bytes / 1_048_576).toFixed(1)} MiB</small>
+                            </span>
+                          </label>
+                          <em>{file.viewpointKey}</em>
+                        </li>
+                      ))}
+                    </ul>
+                    {projectFolderManifest.files.length > 40 && (
+                      <p>另有 {projectFolderManifest.files.length - 40} 张已写入清单；为保持工作台紧凑，此处只显示前 40 张。</p>
+                    )}
+                    <footer>
+                      <small>扫描只读；确认后复制到画布资产区，不修改源目录。</small>
+                      <button
+                        type="button"
+                        className="accent-action"
+                        disabled={!selectedManifestPaths.length || importingProjectFolder || scanningProjectFolder}
+                        onClick={() => void importScannedProjectFolder()}
+                      >{importingProjectFolder ? "正在复制…" : `导入 ${selectedManifestPaths.length} 张`}</button>
+                    </footer>
+                  </div>
+                )}
+                  </>
+                )}
+
+                {codexRunSources.length > 0
+                  && (codexStartSource === "canvas" || projectFolderManifest)
+                  && (!batchRun || batchRun.status === "completed") && (
+                  <section className="codex-authorization-card" aria-label="Codex 运行授权单">
+                    <header>
+                      <span>
+                        <small>RUN AUTHORIZATION</small>
+                        <strong>Codex 自动运行授权单</strong>
+                      </span>
+                      <em>{codexRunSources.length} 项</em>
+                    </header>
+                    <div className="codex-authorization-grid">
+                      <label>
+                        <span>独立阶段</span>
+                        <select
+                          value={bulkStage}
+                          disabled={creatingCodexRun}
+                          onChange={(event) => {
+                            const stage = event.target.value as Exclude<WorkflowStage, "completed">;
+                            setBulkStage(stage);
+                          }}
+                        >
+                          {USER_WORKFLOW_STAGES.map((stage) => (
+                            <option key={stage} value={stage}>{WORKFLOW_STAGE_LABELS[stage]}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <div className="codex-automatic-action" aria-label="Codex 自动运行的自动动作">
+                        <span>本轮动作</span>
+                        <strong>{codexAutomationPlan.label}</strong>
+                        <small>{codexAutomationPlan.detail}</small>
+                      </div>
+                      <label>
+                        <span>批次生成总额度</span>
+                        <input
+                          type="number"
+                          min={codexAutomationPlan.action === "generate" ? codexRunSources.length : 0}
+                          max={200}
+                          value={codexMaximumGenerations}
+                          disabled={creatingCodexRun || codexAutomationPlan.action !== "generate"}
+                          onChange={(event) => setCodexMaximumGenerations(Math.max(0, Math.min(200, Number(event.target.value) || 0)))}
+                        />
+                      </label>
+                    </div>
+                    <ul className="codex-authorization-summary">
+                      <li>
+                        <span>启动来源</span>
+                        <strong title={codexStartSource === "folder" ? projectFolderManifest?.sourceRoot : codexCanvasSourceLabel}>
+                          {codexStartSource === "folder" ? projectFolderManifest?.sourceRoot : `当前画布 · ${codexCanvasSourceLabel}`}
+                        </strong>
+                      </li>
+                      <li><span>输入范围</span><strong>{codexRunSources.length} 张 D5／阶段底图</strong></li>
+                      <li><span>自动动作</span><strong>{codexAutomationPlan.label}</strong></li>
+                      {codexAutomationPlan.action === "generate" && (
+                        <li>
+                          <span>单图尝试额度</span>
+                          <strong>至少 {codexRunSources.length ? Math.floor(codexMaximumGenerations / codexRunSources.length) : 0} 次／底图</strong>
+                        </li>
+                      )}
+                      <li><span>源文件策略</span><strong>{codexStartSource === "folder" ? "只读扫描 · 复制入项目" : "读取项目副本 · 原图不覆盖"}</strong></li>
+                    </ul>
+                    <div className="codex-authorization-options">
+                      <label>
+                        <input type="checkbox" checked={codexStopOnStructureRisk} disabled={creatingCodexRun} onChange={(event) => setCodexStopOnStructureRisk(event.target.checked)} />
+                        <span>结构风险候选自动拒收并补生</span>
+                      </label>
+                      <label>
+                        <input type="checkbox" checked={codexAllowManualFallback} disabled={creatingCodexRun} onChange={(event) => setCodexAllowManualFallback(event.target.checked)} />
+                        <span>Codex 不可用时允许提示切换到浏览器人工批量</span>
+                      </label>
+                      <label className="authorization-confirmation">
+                        <input type="checkbox" checked={codexAuthorizationConfirmed} disabled={creatingCodexRun} onChange={(event) => setCodexAuthorizationConfirmed(event.target.checked)} />
+                        <span>我确认本次阶段、范围与生成上限</span>
+                      </label>
+                    </div>
+                    <footer>
+                      <small>结构风险只淘汰当前候选：单图额度内自动补生，额度用尽后记录失败并继续下一视角；最终玻璃阶段仍严格暂停。</small>
+                      <button
+                        type="button"
+                        className="accent-action"
+                        disabled={
+                          !codexCapabilities
+                          || !codexAuthorizationConfirmed
+                          || creatingCodexRun
+                          || (codexAutomationPlan.action === "generate" && codexMaximumGenerations < codexRunSources.length)
+                        }
+                        onClick={() => void createAuthorizedCodexRun()}
+                      >{creatingCodexRun ? "正在建立…" : "确认并建立 Codex 批次"}</button>
+                    </footer>
+                  </section>
+                )}
+
+                {batchRun?.runner === "codex" && batchRun.status !== "completed" && (
+                  <section className="codex-run-control" data-status={batchRun.status}>
+                    <span>
+                      <small>ACTIVE CODEX RUN</small>
+                      <strong>{batchRun.status === "paused" ? "Codex 自动运行已暂停" : "Codex 自动运行批次已授权"}</strong>
+                      <em>{batchProgress(batchRun).completed}/{batchProgress(batchRun).total} 完成 · 已生成 {batchRun.items.reduce((sum, item) => sum + (item.attemptCount ?? 0), 0)}/{batchRun.authorization?.maximumGenerations ?? 0}</em>
+                    </span>
+                    <div>
+                      <button type="button" disabled={creatingCodexRun} onClick={() => window.location.reload()}>刷新结果</button>
+                      <button
+                        type="button"
+                        disabled={creatingCodexRun}
+                        onClick={() => void transitionVisibleCodexRun(batchRun.status === "paused" ? "resume" : "pause")}
+                      >{batchRun.status === "paused" ? "恢复 Codex" : "安全暂停"}</button>
+                      {batchRun.status === "paused" && batchRun.authorization?.allowManualFallback && (
+                        <button type="button" disabled={creatingCodexRun} onClick={() => void handoffVisibleRun("manual")}>切换到浏览器人工批量</button>
+                      )}
+                    </div>
+                  </section>
+                )}
+
+                {batchRun?.runner === "manual" && batchRun.status === "paused" && (
+                  <section className="codex-run-control" data-status="paused">
+                    <span>
+                      <small>MANUAL RUN PAUSED</small>
+                      <strong>浏览器人工批量已暂停</strong>
+                      <em>只接管未完成项；已提交项必须先回收结果</em>
+                    </span>
+                    <button type="button" disabled={creatingCodexRun} onClick={() => void handoffVisibleRun("codex")}>交给 Codex 继续</button>
+                  </section>
+                )}
+              </div>
+            )}
+          </section>
 
           {selectedBatchNodes.length > 1 && (
             <section className="bulk-selection-panel" aria-label="批量图片阶段设置">
@@ -5324,13 +6697,33 @@ export function App({
             <nav aria-label="工作台工具">
               <button
                 type="button"
-                hidden
+                aria-expanded={workbenchPanel === "viewpoints"}
+                data-active={workbenchPanel === "viewpoints"}
+                onClick={() => setWorkbenchPanel((current) => current === "viewpoints" ? null : "viewpoints")}
+              >
+                <b aria-hidden="true">V</b>
+                <span>视角任务</span>
+                <small>{viewpoints.length ? `${viewpoints.length} 视角` : "待建立"}</small>
+              </button>
+              <button
+                type="button"
+                aria-expanded={workbenchPanel === "execution"}
+                data-active={workbenchPanel === "execution"}
+                onClick={() => setWorkbenchPanel((current) => current === "execution" ? null : "execution")}
+              >
+                <b aria-hidden="true">↔</b>
+                <span>执行通道</span>
+                <small>{executionMode === "manual" ? "浏览器人工" : "Codex 自动"}</small>
+              </button>
+              <button
+                type="button"
+                hidden={!batchWorkbenchEntryVisible(Boolean(batchRun))}
                 aria-expanded={workbenchPanel === "batch"}
                 data-active={workbenchPanel === "batch"}
                 onClick={() => setWorkbenchPanel((current) => current === "batch" ? null : "batch")}
               >
                 <b aria-hidden="true">⇢</b>
-                <span>批量发送</span>
+                <span>当前批次</span>
                 <small>{batchStatusLabel}</small>
               </button>
               <button
@@ -5367,6 +6760,19 @@ export function App({
             </nav>
           </header>
           <div className="generation-drawer-body" data-active-panel={workbenchPanel ?? "none"}>
+        <ViewpointTaskCenter
+          tasks={viewpointTasks}
+          nodes={nodes}
+          activeViewpointId={activeViewpointId}
+          onActivateViewpoint={activateViewpointTask}
+          onFocusVersion={focusCandidateVersion}
+          onComparisonChange={setComparisonVersionIds}
+          onPatchReview={patchCandidateReview}
+          onApprove={approveCandidate}
+          onReject={rejectCandidate}
+          panelWidth={utilityPanelWidth}
+          onPanelWidthChange={changeUtilityPanelWidth}
+        />
         <section className="batch-section compact-section" data-status={batchRun?.status ?? "empty"}>
           <div className="task-heading">
             <div>
@@ -5527,7 +6933,7 @@ export function App({
                     <span>
                       <strong>{item.sourceName}</strong>
                       <small>{item.status === "queued"
-                        ? "等待发送"
+                        ? item.error || "等待发送"
                         : item.status === "running"
                           ? item.error || "GPT 正在处理"
                           : item.status === "completed"
@@ -5574,7 +6980,7 @@ export function App({
                   type="button"
                   disabled={generationActive || generationResultsPending || returningResults}
                   onClick={clearBatch}
-                >清除记录</button>
+                >清除当前批次记录</button>
               </div>
             </>
           ) : selectedBatchNodes.length > 0 ? (

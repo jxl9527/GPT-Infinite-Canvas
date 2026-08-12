@@ -227,11 +227,21 @@ export function removeImageNode(
   nodes: readonly ImageNodeState[],
   nodeId: string
 ): ImageNodeState[] {
-  const removed = nodes.find((node) => node.id === nodeId);
-  if (!removed) return [...nodes];
+  return removeImageNodes(nodes, [nodeId]);
+}
+
+export function removeImageNodes(
+  nodes: readonly ImageNodeState[],
+  nodeIds: Iterable<string>
+): ImageNodeState[] {
+  const removedNodeIds = new Set(nodeIds);
+  const removedVersionIds = new Set(
+    nodes.filter((node) => removedNodeIds.has(node.id)).map((node) => node.versionId)
+  );
+  if (!removedVersionIds.size) return [...nodes];
   return nodes
-    .filter((node) => node.id !== nodeId)
-    .map((node) => node.parentVersionId === removed.versionId
+    .filter((node) => !removedNodeIds.has(node.id))
+    .map((node) => node.parentVersionId && removedVersionIds.has(node.parentVersionId)
       ? { ...node, parentVersionId: null }
       : node
     );

@@ -10,7 +10,7 @@ export interface FixedWorkflowPrompt {
   content: string;
 }
 
-const STRUCTURE_GUARD = `附件中的本项目D5图是唯一结构与构图依据。必须保持建筑数量、体块、比例、层数、屋顶、入口、门窗、幕墙分格、道路、场地边界、相机、透视、画幅和裁切不变。参考图只能影响光影、色彩、材质感觉、配景密度和氛围，不得提供建筑设计。`;
+const STRUCTURE_GUARD = `附件中的本项目D5图是唯一结构与构图依据。把本任务理解为在原图像素坐标上做材质、光影和配景的受控局部编辑，不是重新设计或重新渲染建筑。必须逐项保持建筑数量、外轮廓、体块、比例、层数、屋顶、入口净空、柱网、阳台、门窗洞口、幕墙分格、道路交叉口、斑马线、路缘、场地边界、相机、透视、画幅和裁切不变；所有硬边、转角、开口和道路边线必须与原图对齐。参考图只能影响光影、色彩、材质感觉、配景密度和氛围，不得提供建筑设计。若某项优化需要重绘结构，宁可不优化该处。`;
 
 const STAGE_ACTION_PROMPTS: Readonly<Record<WorkflowStage, Readonly<Record<WorkflowAction, string>>>> = {
   preflight: {
@@ -100,7 +100,7 @@ export const FIXED_WORKFLOW_PROMPTS: readonly FixedWorkflowPrompt[] = [
   },
   {
     id: "fixed_scene_reference_prompt",
-    title: "02A｜有参考图生成场景提示词",
+    title: "优化阶段｜参考风格生成提示词",
     summary: "参考配景、光影和氛围，底图仍是唯一结构依据",
     stage: "scene-optimization",
     action: "prompt",
@@ -108,7 +108,7 @@ export const FIXED_WORKFLOW_PROMPTS: readonly FixedWorkflowPrompt[] = [
   },
   {
     id: "fixed_scene_direction_prompt",
-    title: "02B｜无参考图生成场景提示词",
+    title: "优化阶段｜文字方向生成提示词",
     summary: "按日景、清晨、夕阳、人物和景观方向组织提示词",
     stage: "scene-optimization",
     action: "prompt",
@@ -116,7 +116,7 @@ export const FIXED_WORKFLOW_PROMPTS: readonly FixedWorkflowPrompt[] = [
   },
   {
     id: "fixed_prompt_optimizer",
-    title: "02C｜不完整提示词优化",
+    title: "优化阶段｜继续优化提示词",
     summary: "保留原意，补齐位置、光影、保护规则和禁止项",
     stage: "scene-optimization",
     action: "prompt",
@@ -124,7 +124,7 @@ export const FIXED_WORKFLOW_PROMPTS: readonly FixedWorkflowPrompt[] = [
   },
   {
     id: "fixed_scene_generate",
-    title: "02D｜按提示词生成D5目标图",
+    title: "优化阶段｜按提示词生成 D5 目标图",
     summary: "使用确认后的提示词生成完整D5氛围参考图",
     stage: "scene-optimization",
     action: "generate",

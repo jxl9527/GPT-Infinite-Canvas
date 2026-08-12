@@ -12,6 +12,7 @@ import {
 } from "./project-requirements.js";
 import { ResultRepository } from "./result-repository.js";
 import { TaskStore } from "./task-store.js";
+import { ProjectFolderManifestService } from "./project-folder-manifest.js";
 
 const LEGACY_PROJECT_ID = "project_default";
 const PROJECT_ID_PATTERN = /^project_[a-f0-9-]{36}$/;
@@ -78,6 +79,7 @@ export interface ProjectRuntimeContext {
   diagnostics: DiagnosticLogger;
   results: ResultRepository;
   delivery: DeliveryRepository;
+  folderManifests: ProjectFolderManifestService;
 }
 
 export interface ActiveProjectRequirements {
@@ -113,6 +115,15 @@ async function readJson(path: string): Promise<Record<string, unknown> | null> {
   } catch {
     return null;
   }
+}
+
+function activeCodexBatchStatus(context: ProjectRuntimeContext | null): string | null {
+  const project = context?.canvasProject.read();
+  if (!project || typeof project.workflow !== "object" || project.workflow === null || Array.isArray(project.workflow)) return null;
+  const batchRun = (project.workflow as Record<string, unknown>).batchRun;
+  if (!batchRun || typeof batchRun !== "object" || Array.isArray(batchRun)) return null;
+  const run = batchRun as Record<string, unknown>;
+  return run.runner === "codex" && typeof run.status === "string" ? run.status : null;
 }
 
 export class ProjectRuntimeManager {
@@ -349,6 +360,10 @@ export class ProjectRuntimeManager {
     if (this.active?.id === idValue && this.active.store.getActive()) {
       throw new ProtocolError("TASK_LOCKED", "当前项目仍有生成任务，结束任务后才能删除项目");
     }
+    const codexBatchStatus = this.active?.id === idValue ? activeCodexBatchStatus(this.active) : null;
+    if (codexBatchStatus && codexBatchStatus !== "completed") {
+      throw new ProtocolError("TASK_LOCKED", "当前项目仍有未完成的 Codex 批次，完成批次后才能删除项目");
+    }
     const record = (await this.records()).find((candidate) => candidate.metadata.id === idValue);
     if (!record) throw new ProtocolError("TASK_NOT_FOUND", "准备删除的项目不存在");
     const expectedRoot = resolve(this.projectsRoot, idValue);
@@ -500,6 +515,10 @@ export class ProjectRuntimeManager {
     if (this.active?.store.getActive()) {
       throw new ProtocolError("TASK_LOCKED", "当前项目仍有生成任务，完成或人工接管后才能切换项目");
     }
+    const codexBatchStatus = activeCodexBatchStatus(this.active);
+    if (codexBatchStatus === "ready" || codexBatchStatus === "running") {
+      throw new ProtocolError("TASK_LOCKED", "当前项目仍有活动的 Codex 批次，请先暂停或完成后再切换项目");
+    }
     const record = (await this.records()).find((candidate) => candidate.metadata.id === id);
     if (!record) throw new ProtocolError("TASK_NOT_FOUND", "选择的项目不存在");
     const store = new TaskStore(record.projectRoot); await store.init();
@@ -507,7 +526,8 @@ export class ProjectRuntimeManager {
     const canvasProject = new CanvasProjectRepository(record.projectRoot); await canvasProject.init();
     const diagnostics = new DiagnosticLogger(record.projectRoot); await diagnostics.init();
     const results = new ResultRepository(record.projectRoot, store);
-    const delivery = new DeliveryRepository(record.projectRoot, canvasAssets, store); await delivery.init();
+    const delivery = new DeliveryRepository(record.projectRoot, canvasAssets, store, canvasProject); await delivery.init();
+    const folderManifests = new ProjectFolderManifestService(record.projectRoot, canvasAssets); await folderManifests.init();
     this.active = {
       id: record.metadata.id,
       name: record.metadata.name,
@@ -517,7 +537,8 @@ export class ProjectRuntimeManager {
       canvasProject,
       diagnostics,
       results,
-      delivery
+      delivery,
+      folderManifests
     };
     return this.active;
   }

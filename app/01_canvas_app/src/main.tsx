@@ -5,6 +5,7 @@ import { ProjectWorkbench } from "./ProjectWorkbench";
 import type { WorkbenchProject } from "./bridge-client";
 import { projectIdFromUrl, urlForProject, urlForWorkbench } from "./project-route";
 import "./styles.css";
+import "./product-upgrades.css";
 
 const root = document.getElementById("root");
 if (!root) throw new Error("未找到应用挂载节点");

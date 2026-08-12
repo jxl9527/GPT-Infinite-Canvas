@@ -1,0 +1,20 @@
+{
+  "name": "d5-ai-canvas-local",
+  "interface": {
+    "displayName": "D5 AI Canvas Local"
+  },
+  "plugins": [
+    {
+      "name": "d5-ai-canvas",
+      "source": {
+        "source": "local",
+        "path": "./d5-ai-canvas"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

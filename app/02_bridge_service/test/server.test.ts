@@ -41,7 +41,7 @@ test("v1 HTTP 完成附件读取、结果落盘去重、完成校验和脱敏诊
   };
   try {
     const health = await fetch(`${base}/health`).then((response) => response.json()) as { ok: boolean; releaseVersion: string; activeTaskId: string | null };
-    assert.equal(health.ok, true); assert.equal(health.releaseVersion, "0.4.0"); assert.equal(health.activeTaskId, null);
+    assert.equal(health.ok, true); assert.equal(health.releaseVersion, "0.5.3"); assert.equal(health.activeTaskId, null);
 
     const rejectedCanvasSession = await fetch(`${base}/api/v1/canvas/session`, {
       headers: { origin: "https://chatgpt.com" }
@@ -217,6 +217,12 @@ test("v1 HTTP 完成附件读取、结果落盘去重、完成校验和脱敏诊
       batchRun: null
     };
     assert.equal((await post("/api/v1/canvas/project", { project: v3Project })).response.status, 200);
+    const idempotentProject = structuredClone(v3Project);
+    idempotentProject.updatedAt = new Date(Date.now() + 1_000).toISOString();
+    assert.equal((await post("/api/v1/canvas/project", { project: idempotentProject })).response.status, 200);
+    const conflictingProject = structuredClone(v3Project);
+    conflictingProject.title = "同修订冲突写入";
+    assert.equal((await post("/api/v1/canvas/project", { project: conflictingProject })).response.status, 409);
     const invalidProject = structuredClone(project);
     invalidProject.revision = 23;
     invalidProject.versions[0]!.assetId = "asset_missing";
@@ -297,6 +303,37 @@ test("v1 HTTP 完成附件读取、结果落盘去重、完成校验和脱敏诊
       ((savedExportTarget.json.target ?? {}) as { targetDirectory?: string }).targetDirectory,
       finalExportDirectory
     );
+    const generatedCanvasAsset = generatedAsset.json.asset as Record<string, unknown>;
+    const exportProject = structuredClone(v3Project) as Record<string, any>;
+    exportProject.revision = 23;
+    exportProject.assets.push(generatedCanvasAsset);
+    exportProject.versions.push({
+      id: "version_final_glass_01",
+      assetId: generatedCanvasAsset.id,
+      origin: "generated",
+      parentVersionId: versionId,
+      taskId: "task_final_glass_01",
+      createdAt: new Date().toISOString()
+    });
+    exportProject.taskLinks.push({
+      taskId: "task_final_glass_01",
+      parentVersionId: versionId,
+      resultVersionIds: ["version_final_glass_01"],
+      status: "completed"
+    });
+    exportProject.workflow.viewpoints[0] = {
+      ...exportProject.workflow.viewpoints[0],
+      stage: "final-glass",
+      selectedVersionId: "version_final_glass_01",
+      finalGlass: {
+        finalD5VersionId: versionId,
+        candidateVersionIds: ["version_final_glass_01"],
+        selectedVersionIds: ["version_final_glass_01"],
+        validation: "passed",
+        status: "selected"
+      }
+    };
+    assert.equal((await post("/api/v1/canvas/project", { project: exportProject })).response.status, 200);
     const batchExport = await post("/api/v1/canvas/final-glass/batch-export", {
       selections: [{
         assetId: (generatedAsset.json.asset as { id: string }).id,

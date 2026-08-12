@@ -14,6 +14,7 @@ import {
   placeChildToRightStacked,
   placeImageContextToolbar,
   removeImageNode,
+  removeImageNodes,
   type ImageNodeState
 } from "../src/canvas-layout.js";
 
@@ -131,6 +132,34 @@ test("生成结果固定放到父节点右侧并记录父版本", () => {
   assert.equal(child.y, 120);
   assert.equal(child.parentVersionId, "version_test");
   assert.equal(child.taskId, "task_demo");
+});
+
+test("批量删除全部已选图片并解除剩余子节点的父版本引用", () => {
+  const child = {
+    ...baseNode,
+    id: "node_child" as const,
+    versionId: "version_child" as const,
+    parentVersionId: baseNode.versionId
+  };
+  const grandchild = {
+    ...baseNode,
+    id: "node_grandchild" as const,
+    versionId: "version_grandchild" as const,
+    parentVersionId: child.versionId
+  };
+  const sibling = {
+    ...baseNode,
+    id: "node_sibling" as const,
+    versionId: "version_sibling" as const,
+    parentVersionId: null
+  };
+  const remaining = removeImageNodes(
+    [baseNode, child, grandchild, sibling],
+    [baseNode.id, child.id]
+  );
+  assert.deepEqual(remaining.map((node) => node.id), [grandchild.id, sibling.id]);
+  assert.equal(remaining[0]?.parentVersionId, null);
+  assert.equal(remaining[1]?.parentVersionId, null);
 });
 
 test("同源生成结果在父图右侧纵向排队且不覆盖已有结果", () => {

@@ -70,12 +70,12 @@ test("文字卡阶段副标题显示完整工作流名称并兼容旧内容推�
     workflowStage: "scene-optimization",
     action: "prompt",
     hasStyleReference: true
-  }), "阶段02A · 有参考图生成提示词");
+  }), "优化阶段 · 参考风格生成提示词");
   assert.equal(inferTextCardWorkflowLabel({
     kind: "prompt",
     prompt: "【不完整提示词优化】\n用户原始提示词：增强绿化"
-  }), "阶段02C · 不完整提示词优化");
-  assert.equal(inferTextCardWorkflowLabel({ kind: "review", prompt: "【主要问题】\n构图偏满" }), "阶段01 · 前置阶段：构图＋SU细节");
+  }), "优化阶段 · 继续优化提示词");
+  assert.equal(inferTextCardWorkflowLabel({ kind: "review", prompt: "【主要问题】\n构图偏满" }), "阶段一 · 构图与 SU 审查");
 });
 
 test("文字卡按画布缩放比例自由调整宽高并保持最小可用尺寸", () => {

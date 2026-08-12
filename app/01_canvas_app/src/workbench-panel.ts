@@ -112,6 +112,10 @@ export function batchWorkbenchStatus(input: {
   return pending > 0 ? `${pending}张待发送` : "未选择";
 }
 
+export function batchWorkbenchEntryVisible(hasBatchRun: boolean): boolean {
+  return hasBatchRun;
+}
+
 export function promptWorkbenchStatus(count: number): string {
   return `${Math.max(0, count)}条`;
 }

@@ -5,6 +5,98 @@ export const MAX_VIEWPOINT_NAME_LENGTH = 40;
 export const WORKFLOW_STAGES_V3 = ["preflight", "scene-optimization", "final-glass", "completed"] as const;
 export type WorkflowStageV3 = (typeof WORKFLOW_STAGES_V3)[number];
 
+export const WORKFLOW_RUNNER_KINDS = ["manual", "codex"] as const;
+export type WorkflowRunnerKind = (typeof WORKFLOW_RUNNER_KINDS)[number];
+
+export const WORKFLOW_RUN_CHECKPOINTS = [
+  "manifest-confirmed",
+  "analysis-completed",
+  "prompt-approved",
+  "generation-submitted",
+  "result-registered",
+  "validation-completed",
+  "human-selected",
+  "exported"
+] as const;
+export type WorkflowRunCheckpoint = (typeof WORKFLOW_RUN_CHECKPOINTS)[number];
+
+export interface WorkflowRunAuthorization {
+  id: `authorization_${string}`;
+  sourceFolder: string | null;
+  stage: Exclude<WorkflowStageV3, "completed">;
+  itemCount: number;
+  maximumGenerations: number;
+  allowManualFallback: boolean;
+  stopOnStructureRisk: boolean;
+  approvedAt: string;
+}
+
+export interface WorkflowExecutionMetadata {
+  runner: WorkflowRunnerKind;
+  authorization?: WorkflowRunAuthorization | null;
+  codexThreadId?: string | null;
+  leaseOwner?: string | null;
+  leaseExpiresAt?: string | null;
+}
+
+export interface WorkflowItemExecutionMetadata {
+  runner: WorkflowRunnerKind;
+  checkpoint?: WorkflowRunCheckpoint | null;
+  idempotencyKey: string;
+  attemptCount: number;
+  sourceHash?: string | null;
+  promptHash?: string | null;
+}
+
+export const PROJECT_FOLDER_FILE_ROLES = [
+  "d5-view",
+  "su-reference",
+  "style-reference",
+  "ignored-channel"
+] as const;
+export type ProjectFolderFileRole = (typeof PROJECT_FOLDER_FILE_ROLES)[number];
+
+export interface ProjectFolderManifestFile {
+  relativePath: string;
+  name: string;
+  mime: ImageMime;
+  bytes: number;
+  sha256: string;
+  modifiedAt: string;
+  suggestedRole: ProjectFolderFileRole;
+  viewpointKey: string;
+  importable: boolean;
+  reason?: string;
+}
+
+export interface ProjectFolderManifest {
+  schemaVersion: "1.0";
+  id: `manifest_${string}`;
+  sourceRoot: string;
+  includeSubfolders: boolean;
+  scannedAt: string;
+  fileCount: number;
+  importableCount: number;
+  totalBytes: number;
+  files: ProjectFolderManifestFile[];
+}
+
+export interface ImportedManifestFile {
+  relativePath: string;
+  suggestedRole: ProjectFolderFileRole;
+  viewpointKey: string;
+  status: "imported" | "deduplicated" | "failed";
+  asset?: CanvasImageAsset;
+  error?: string;
+}
+
+export interface ProjectFolderImportResult {
+  manifestId: ProjectFolderManifest["id"];
+  importedAt: string;
+  completed: boolean;
+  items: ImportedManifestFile[];
+}
+
 export const CANVAS_OUTPUT_KINDS = [
   "preflight-review",
   "d5-scene-target",

@@ -5,6 +5,7 @@ import {
   WORKBENCH_MIN_HEIGHT,
   WORKBENCH_MAX_WIDTH,
   WORKBENCH_MIN_WIDTH,
+  batchWorkbenchEntryVisible,
   batchWorkbenchStatus,
   appendUnifiedTaskRequirement,
   clampWorkbenchHeight,
@@ -101,6 +102,11 @@ test("工作台入口状态使用带单位的明确语义", () => {
   assert.equal(previewWorkbenchStatus(true, 0), "已就绪");
   assert.equal(deliveryWorkbenchStatus(2, true), "2张可导出");
   assert.equal(deliveryWorkbenchStatus(0, false), "未就绪");
+});
+
+test("存在当前批次时必须显示可清除的工作台入口", () => {
+  assert.equal(batchWorkbenchEntryVisible(false), false);
+  assert.equal(batchWorkbenchEntryVisible(true), true);
 });
 
 test("套用提示词时明确区分替换与追加", () => {

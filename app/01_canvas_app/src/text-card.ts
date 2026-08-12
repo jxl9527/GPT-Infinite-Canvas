@@ -15,6 +15,7 @@ export interface CanvasTextCard {
   taskId: `task_${string}`;
   workflowLabel?: string;
   handoffState?: CanvasTextCardHandoffState;
+  idempotencyKey?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -41,12 +42,12 @@ export interface ReturnedTextSection {
 }
 
 export const TEXT_CARD_WORKFLOW_LABELS = {
-  preflight: "阶段01 · 前置阶段：构图＋SU细节",
-  sceneReference: "阶段02A · 有参考图生成提示词",
-  sceneDirection: "阶段02B · 无参考图生成提示词",
-  promptOptimizer: "阶段02C · 不完整提示词优化",
-  sceneGenerate: "阶段02D · 按提示词生成D5目标图",
-  finalGlass: "阶段03 · 最终阶段：整图玻璃深化"
+  preflight: "阶段一 · 构图与 SU 审查",
+  sceneReference: "优化阶段 · 参考风格生成提示词",
+  sceneDirection: "优化阶段 · 文字方向生成提示词",
+  promptOptimizer: "优化阶段 · 继续优化提示词",
+  sceneGenerate: "优化阶段 · 按提示词生成 D5 目标图",
+  finalGlass: "阶段三 · 最终玻璃深化"
 } as const;
 
 export const TEXT_CARD_MIN_WIDTH = 320;
@@ -73,6 +74,7 @@ export function createCanvasTextCard(input: {
   sourceVersionId: `version_${string}` | null;
   taskId: `task_${string}`;
   workflowLabel?: string;
+  idempotencyKey?: string;
   sourceBounds?: { x: number; y: number; width: number; height: number } | null;
   siblingCount?: number;
   now?: string;
@@ -94,6 +96,7 @@ export function createCanvasTextCard(input: {
     sourceVersionId: input.sourceVersionId,
     taskId: input.taskId,
     ...(input.workflowLabel?.trim() ? { workflowLabel: input.workflowLabel.trim().slice(0, 120) } : {}),
+    ...(input.idempotencyKey?.trim() ? { idempotencyKey: input.idempotencyKey.trim().slice(0, 500) } : {}),
     createdAt: now,
     updatedAt: now
   };
