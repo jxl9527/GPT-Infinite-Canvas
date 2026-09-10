@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { AddressInfo } from "node:net";
@@ -25,7 +25,12 @@ test("v1 HTTP 完成附件读取、结果落盘去重、完成校验和脱敏诊
     projects,
     token,
     canvasOrigins: ["http://127.0.0.1:9999"],
-    allowedOrigins: ["http://127.0.0.1:9999", "https://chatgpt.com", "https://chat.openai.com"]
+    allowedOrigins: [
+      "http://127.0.0.1:9999",
+      "https://chatgpt.com",
+      "https://chat.openai.com",
+      "https://labs.google"
+    ]
   });
   await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
   const address = server.address() as AddressInfo; const base = `http://127.0.0.1:${address.port}`;
@@ -35,8 +40,8 @@ test("v1 HTTP 完成附件读取、结果落盘去重、完成校验和脱敏诊
     return { response, json: await response.json() as Record<string, unknown> };
   };
   try {
-    const health = await fetch(`${base}/health`).then((response) => response.json()) as { ok: boolean; activeTaskId: string | null };
-    assert.equal(health.ok, true); assert.equal(health.activeTaskId, null);
+    const health = await fetch(`${base}/health`).then((response) => response.json()) as { ok: boolean; releaseVersion: string; activeTaskId: string | null };
+    assert.equal(health.ok, true); assert.equal(health.releaseVersion, "0.5.3"); assert.equal(health.activeTaskId, null);
 
     const rejectedCanvasSession = await fetch(`${base}/api/v1/canvas/session`, {
       headers: { origin: "https://chatgpt.com" }
@@ -153,8 +158,73 @@ test("v1 HTTP 完成附件读取、结果落盘去重、完成校验和脱敏诊
     const restoredProject = await fetch(`${base}/api/v1/canvas/project`, { headers })
       .then((response) => response.json()) as { project: { revision: number } };
     assert.equal(restoredProject.project.revision, 20);
+    const ordinaryGptBatchProject = structuredClone(project);
+    ordinaryGptBatchProject.revision = 21;
+    (ordinaryGptBatchProject as typeof ordinaryGptBatchProject & { workflow: unknown }).workflow = {
+      activeViewpointId: null,
+      viewpoints: [],
+      handoffs: [],
+      customGptUrl: "",
+      customGptEnabled: false,
+      textCards: [],
+      batchRun: {
+        id: "batch_00000000-0000-0000-0000-000000000001",
+        status: "ready",
+        prompt: "普通 GPT 批量任务",
+        styleReferenceVersionId: null,
+        targetChatUrl: "",
+        items: [{
+          id: "batch_item_00000000-0000-0000-0000-000000000001",
+          sourceVersionId: versionId,
+          sourceName: "结构图.png",
+          status: "queued",
+          taskId: null,
+          resultVersionIds: [],
+          error: ""
+        }],
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      }
+    };
+    assert.equal((await post("/api/v1/canvas/project", { project: ordinaryGptBatchProject })).response.status, 200);
+    const v3Project = structuredClone(project) as typeof project & { workflow?: unknown };
+    (v3Project as { schemaVersion: string }).schemaVersion = "2.0";
+    v3Project.revision = 22;
+    v3Project.workflow = {
+      activeViewpointId: "viewpoint_v3",
+      viewpoints: [{
+        id: "viewpoint_v3",
+        name: "1人视",
+        purpose: "主入口",
+        stage: "preflight",
+        status: "in-progress",
+        statusMode: "auto",
+        d5Batch: "D5_01",
+        sourceVersionId: versionId,
+        selectedVersionId: null,
+        conclusion: "",
+        nextAction: "",
+        preflight: { d5ViewVersionId: versionId, suReferenceVersionId: null, conclusionCardId: null, status: "pending" },
+        sceneOptimization: { structureBaseVersionId: null, styleReferenceVersionId: null, promptCardId: null, candidateVersionIds: [], selectedVersionId: null, status: "not-run" },
+        finalGlass: { finalD5VersionId: null, candidateVersionIds: [], selectedVersionIds: [], validation: "pending", status: "not-run" },
+        export: { targetDirectory: null, exportedVersionIds: [], exportedFiles: [], exportedAt: null, status: "pending" },
+        updatedAt: new Date().toISOString()
+      }],
+      handoffs: [],
+      customGptUrl: "",
+      customGptEnabled: false,
+      textCards: [],
+      batchRun: null
+    };
+    assert.equal((await post("/api/v1/canvas/project", { project: v3Project })).response.status, 200);
+    const idempotentProject = structuredClone(v3Project);
+    idempotentProject.updatedAt = new Date(Date.now() + 1_000).toISOString();
+    assert.equal((await post("/api/v1/canvas/project", { project: idempotentProject })).response.status, 200);
+    const conflictingProject = structuredClone(v3Project);
+    conflictingProject.title = "同修订冲突写入";
+    assert.equal((await post("/api/v1/canvas/project", { project: conflictingProject })).response.status, 409);
     const invalidProject = structuredClone(project);
-    invalidProject.revision = 21;
+    invalidProject.revision = 23;
     invalidProject.versions[0]!.assetId = "asset_missing";
     assert.equal((await post("/api/v1/canvas/project", { project: invalidProject })).response.status, 422);
 
@@ -184,6 +254,12 @@ test("v1 HTTP 完成附件读取、结果落盘去重、完成校验和脱敏诊
     assert.equal(attachment.status, 200); assert.equal(attachment.headers.get("content-type"), "image/png");
     assert.equal(attachment.headers.get("access-control-allow-origin"), "https://chatgpt.com");
     assert.deepEqual(Buffer.from(await attachment.arrayBuffer()), pixel);
+    const flowPreflight = await fetch(`${base}/api/v1/tasks/${created.id}/attachments/${created.attachments[0]?.id}`, {
+      method: "OPTIONS",
+      headers: { origin: "https://labs.google" }
+    });
+    assert.equal(flowPreflight.status, 204);
+    assert.equal(flowPreflight.headers.get("access-control-allow-origin"), "https://labs.google");
 
     assert.equal((await post(`/api/v1/tasks/${created.id}/claim`, {})).response.status, 200);
     for (const status of ["uploading", "ready-to-submit", "submitted", "generating", "collecting"]) {
@@ -217,12 +293,85 @@ test("v1 HTTP 完成附件读取、结果落盘去重、完成校验和脱敏诊
     });
     assert.equal(generatedAsset.response.status, 201);
     assert.equal((generatedAsset.json.asset as { kind: string }).kind, "generated");
+    const finalExportDirectory = join(root, "exports", "玻璃深化");
+    await mkdir(join(root, "exports"), { recursive: true });
+    const savedExportTarget = await post("/api/v1/canvas/delivery-target", {
+      targetDirectory: finalExportDirectory
+    });
+    assert.equal(savedExportTarget.response.status, 200);
+    assert.equal(
+      ((savedExportTarget.json.target ?? {}) as { targetDirectory?: string }).targetDirectory,
+      finalExportDirectory
+    );
+    const generatedCanvasAsset = generatedAsset.json.asset as Record<string, unknown>;
+    const exportProject = structuredClone(v3Project) as Record<string, any>;
+    exportProject.revision = 23;
+    exportProject.assets.push(generatedCanvasAsset);
+    exportProject.versions.push({
+      id: "version_final_glass_01",
+      assetId: generatedCanvasAsset.id,
+      origin: "generated",
+      parentVersionId: versionId,
+      taskId: "task_final_glass_01",
+      createdAt: new Date().toISOString()
+    });
+    exportProject.taskLinks.push({
+      taskId: "task_final_glass_01",
+      parentVersionId: versionId,
+      resultVersionIds: ["version_final_glass_01"],
+      status: "completed"
+    });
+    exportProject.workflow.viewpoints[0] = {
+      ...exportProject.workflow.viewpoints[0],
+      stage: "final-glass",
+      selectedVersionId: "version_final_glass_01",
+      finalGlass: {
+        finalD5VersionId: versionId,
+        candidateVersionIds: ["version_final_glass_01"],
+        selectedVersionIds: ["version_final_glass_01"],
+        validation: "passed",
+        status: "selected"
+      }
+    };
+    assert.equal((await post("/api/v1/canvas/project", { project: exportProject })).response.status, 200);
+    const batchExport = await post("/api/v1/canvas/final-glass/batch-export", {
+      selections: [{
+        assetId: (generatedAsset.json.asset as { id: string }).id,
+        versionId: "version_final_glass_01",
+        viewpointName: "1人视"
+      }]
+    });
+    assert.equal(batchExport.response.status, 201);
+    assert.equal(((batchExport.json.export ?? {}) as { exported?: number }).exported, 1);
+    assert.deepEqual(await readFile(join(finalExportDirectory, "1人视_玻璃整图_01.png")), generatedPixel);
 
     const completed = await post(`/api/v1/tasks/${created.id}/complete`, { by: "test" });
     assert.equal(completed.response.status, 200);
     assert.equal(((completed.json.task ?? {}) as { status: string }).status, "completed");
     const delayedResult = await post(`/api/v1/tasks/${created.id}/results`, { dataUrl: generatedDataUrl });
     assert.equal(delayedResult.response.status, 409);
+
+    const textTaskCall = await post("/api/v1/tasks", {
+      taskType: "edit",
+      responseMode: "text",
+      target: { chatMode: "new" },
+      prompt: "阶段二：只审查锁定视角中的SU可见细节，不生成图片",
+      attachments: []
+    });
+    assert.equal(textTaskCall.response.status, 201);
+    const textTask = textTaskCall.json.task as { id: string; responseMode: string };
+    assert.equal(textTask.responseMode, "text");
+    await post(`/api/v1/tasks/${textTask.id}/claim`, {});
+    for (const status of ["ready-to-submit", "submitted", "generating", "collecting"]) {
+      assert.equal((await post(`/api/v1/tasks/${textTask.id}/status`, { status, by: "test" })).response.status, 200);
+    }
+    const textStored = await post(`/api/v1/tasks/${textTask.id}/text-result`, {
+      text: "建议只补充主视角可见的窗框厚度和玻璃内凹。"
+    });
+    assert.equal(textStored.response.status, 201);
+    const textCompleted = await post(`/api/v1/tasks/${textTask.id}/complete`, { by: "test" });
+    assert.equal(textCompleted.response.status, 200);
+    assert.match(String((textCompleted.json.task as { textResult?: { text?: string } }).textResult?.text), /窗框厚度/);
 
     const exported = await post("/api/v1/diagnostics/export", {}); assert.equal(exported.response.status, 201);
     const diagnostic = exported.json.diagnostic as { relativePath: string; sha256: string };
@@ -302,6 +451,11 @@ test("v1 HTTP 完成附件读取、结果落盘去重、完成校验和脱敏诊
       await readFile(join(root, ".runtime", "projects", blankProject.id, "project-meta.json"), "utf8")
     ) as { requirements?: unknown };
     assert.equal(blankMetadata.requirements, undefined);
+    const deletedBlankCall = await post(`/api/v1/workbench/projects/${blankProject.id}/delete`, {});
+    assert.equal(deletedBlankCall.response.status, 200);
+    assert.equal(await stat(join(root, ".runtime", "projects", blankProject.id)).catch(() => null), null);
+    assert.ok((await readdir(join(root, ".runtime", "trash", "projects"))).some((name) => name.startsWith(`${blankProject.id}.deleted-`)));
+    assert.equal((await post("/api/v1/workbench/projects/project_default/delete", {})).response.status, 422);
     const createdProjectCall = await post("/api/v1/workbench/projects", {
       name: "空白产业园方案",
       requirements: { sourceName: "项目需求.md", content: requirementsMarkdown }

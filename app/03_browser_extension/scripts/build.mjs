@@ -21,7 +21,7 @@ await mkdir(join(distRoot, "content"), { recursive: true });
 for (const file of ["background.js", "background-guards.js", "popup.js"]) {
   await cp(join(buildRoot, "module", file), join(distRoot, file));
 }
-for (const file of ["page-state.js", "chatgpt-adapter.js", "content.js", "canvas-trigger.js"]) {
+for (const file of ["page-state.js", "chatgpt-adapter.js", "flow-adapter.js", "content.js", "canvas-trigger.js"]) {
   await cp(join(buildRoot, "content", file), join(distRoot, "content", file));
 }
 for (const file of ["manifest.json", "popup.html", "popup.css"]) await cp(join(extensionRoot, file), join(distRoot, file));

@@ -1,15 +1,16 @@
 {
   "manifest_version": 3,
   "name": "GPT Canvas Bridge",
-  "version": "1.2.0",
-  "description": "GPT Canvas：从本地画布一键自动执行 ChatGPT 单任务生成与回图。",
-  "permissions": ["storage", "tabs"],
+  "version": "1.5.22",
+  "description": "GPT Canvas：从本地画布一键桥接 ChatGPT 或 Google Flow，自动执行单图生成与回图。",
+  "permissions": ["storage", "tabs", "debugger"],
   "host_permissions": [
     "http://127.0.0.1:3220/*",
     "http://127.0.0.1:3230/*",
     "http://localhost:3230/*",
     "https://chatgpt.com/*",
-    "https://chat.openai.com/*"
+    "https://chat.openai.com/*",
+    "https://labs.google/*"
   ],
   "action": {
     "default_title": "GPT Canvas Bridge",
@@ -21,10 +22,11 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
+      "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*", "https://labs.google/fx/*"],
       "js": [
         "content/page-state.js",
         "content/chatgpt-adapter.js",
+        "content/flow-adapter.js",
         "content/content.js"
       ],
       "run_at": "document_idle"

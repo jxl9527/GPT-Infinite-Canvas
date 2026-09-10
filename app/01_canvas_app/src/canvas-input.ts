@@ -9,7 +9,8 @@ export type CanvasKeyboardAction =
   | "tool-text"
   | "tool-arrow"
   | "tool-freehand"
-  | "tool-rectangle";
+  | "tool-rectangle"
+  | "tool-marquee";
 
 export function canvasKeyboardAction(
   key: string,
@@ -33,5 +34,6 @@ export function canvasKeyboardAction(
   if (normalized === "a") return "tool-arrow";
   if (normalized === "p") return "tool-freehand";
   if (normalized === "r") return "tool-rectangle";
+  if (normalized === "m") return "tool-marquee";
   return null;
 }

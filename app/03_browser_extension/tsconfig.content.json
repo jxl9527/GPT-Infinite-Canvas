@@ -16,6 +16,7 @@
     "src/chrome-globals.d.ts",
     "src/content/page-state.ts",
     "src/content/chatgpt-adapter.ts",
+    "src/content/flow-adapter.ts",
     "src/content/content.ts",
     "src/content/canvas-trigger.ts"
   ]

@@ -60,4 +60,10 @@ test("输入框和组合键不会误触发删除或工具快捷键", () => {
     hasSelectedImage: false,
     modifierPressed: false
   }), "tool-freehand");
+  assert.equal(canvasKeyboardAction("m", {
+    editableTarget: false,
+    hasSelectedAnnotation: false,
+    hasSelectedImage: false,
+    modifierPressed: false
+  }), "tool-marquee");
 });

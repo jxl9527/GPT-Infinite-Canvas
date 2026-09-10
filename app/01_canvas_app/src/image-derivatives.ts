@@ -29,6 +29,23 @@ async function resizeImage(
   return webp.startsWith("data:image/webp") ? webp : canvas.toDataURL("image/png");
 }
 
+export async function resizeImageToExactDimensions(
+  src: string,
+  width: number,
+  height: number
+): Promise<string> {
+  const image = await loadImage(src);
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(width));
+  canvas.height = Math.max(1, Math.round(height));
+  const context = canvas.getContext("2d", { alpha: false });
+  if (!context) throw new Error("浏览器无法创建PS对齐图");
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL("image/png");
+}
+
 export async function createImageDerivatives(src: string): Promise<{
   displayDataUrl: string;
   thumbnailDataUrl: string;

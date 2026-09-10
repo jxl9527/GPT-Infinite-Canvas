@@ -1,0 +1,24 @@
+{
+  "name": "d5-ai-canvas",
+  "version": "0.5.3",
+  "description": "Safely runs the D5 AI Canvas three-stage architectural image workflow through the local bridge.",
+  "author": {
+    "name": "D5 AI Canvas"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "D5 AI Canvas",
+    "shortDescription": "Run authorized D5 canvas batches from Codex.",
+    "longDescription": "Connects Codex to the local D5 AI Canvas bridge for read-only folder scanning, copied-asset import, authorized three-stage runs, review cards, and safe pause or resume.",
+    "developerName": "D5 AI Canvas",
+    "category": "Productivity",
+    "capabilities": ["Local MCP", "Read-only folder scan", "Authorized workflow write"],
+    "defaultPrompt": [
+      "检查 D5 AI Canvas 连接和当前项目状态。",
+      "扫描我指定的项目文件夹，并生成只读导入清单。",
+      "按已确认授权单运行 D5 三阶段画布任务。"
+    ],
+    "brandColor": "#7F1D2D"
+  },
+  "mcpServers": "./.mcp.json"
+}

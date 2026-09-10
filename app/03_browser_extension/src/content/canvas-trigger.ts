@@ -11,10 +11,13 @@ const TASK_ATTRIBUTE = "data-gpt-canvas-task-id";
 const STATUS_ATTRIBUTE = "data-gpt-canvas-automation-status";
 const MESSAGE_ATTRIBUTE = "data-gpt-canvas-automation-message";
 const COMPLETED_TASK_ATTRIBUTE = "data-gpt-canvas-completed-task-id";
+const VERSION_ATTRIBUTE = "data-gpt-canvas-extension-version";
+const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 
 function publishStatus(status: "ready" | "started" | "error", message: string): void {
   document.documentElement.setAttribute(STATUS_ATTRIBUTE, status);
   document.documentElement.setAttribute(MESSAGE_ATTRIBUTE, message);
+  document.documentElement.setAttribute(VERSION_ATTRIBUTE, EXTENSION_VERSION);
   window.dispatchEvent(new Event(STATUS_EVENT));
 }
 
@@ -43,4 +46,4 @@ chrome.runtime.onMessage.addListener((message: unknown) => {
   window.dispatchEvent(new Event(COMPLETED_EVENT));
 });
 
-publishStatus("ready", "全自动桥接扩展 1.2.0 已连接");
+publishStatus("ready", `全自动桥接扩展 ${EXTENSION_VERSION} 已连接`);

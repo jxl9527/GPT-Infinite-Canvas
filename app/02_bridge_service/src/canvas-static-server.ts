@@ -25,7 +25,10 @@ function sendText(response: ServerResponse, status: number, message: string): vo
   response.end(`${message}\n`);
 }
 
-export function createCanvasStaticServer(distRootInput: string) {
+export function createCanvasStaticServer(
+  distRootInput: string,
+  bridgeOrigin = "http://127.0.0.1:3220"
+) {
   const distRoot = resolve(distRootInput);
   return createServer(async (request, response) => {
     try {
@@ -53,7 +56,7 @@ export function createCanvasStaticServer(distRootInput: string) {
         "content-type": CONTENT_TYPES[extension] ?? "application/octet-stream",
         "content-length": info.size,
         "cache-control": extension === ".html" ? "no-store" : "public, max-age=31536000, immutable",
-        "content-security-policy": "default-src 'self'; img-src 'self' data: blob:; connect-src http://127.0.0.1:3220; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+        "content-security-policy": `default-src 'self'; img-src 'self' data: blob:; connect-src ${bridgeOrigin}; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`,
         "referrer-policy": "no-referrer",
         "x-content-type-options": "nosniff",
         "x-frame-options": "DENY"

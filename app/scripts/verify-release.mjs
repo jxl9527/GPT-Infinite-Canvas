@@ -45,7 +45,7 @@ const projectAssets = new Map(project.assets.map((asset) => [asset.id, asset]));
 const indexedAssets = new Map(assetIndex.assets.map((asset) => [asset.id, asset]));
 const versions = new Map(project.versions.map((version) => [version.id, version]));
 
-check("schemaVersion", project.schemaVersion === "1.0", project.schemaVersion);
+check("schemaVersion", project.schemaVersion === "1.0" || project.schemaVersion === "2.0", project.schemaVersion);
 check("至少 20 个图片节点", imageNodes.length >= 20, imageNodes.length);
 check("批注已保存", annotations.length >= 1, annotations.length);
 check("图片版本完整", project.versions.length === imageNodes.length, project.versions.length);

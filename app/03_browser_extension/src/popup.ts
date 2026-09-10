@@ -2,7 +2,11 @@ interface PopupTask {
   id: string;
   status: string;
   taskType: string;
-  target: { chatMode: "new" | "existing" };
+  target: {
+    provider?: "chatgpt" | "google-flow";
+    chatMode: "new" | "existing";
+    outputCount?: 1 | 2 | 3 | 4;
+  };
   attachments: unknown[];
 }
 
@@ -33,11 +37,13 @@ function show(text: string, error = false): void {
 }
 
 function render(task: PopupTask | null | undefined): void {
+  const provider = task?.target.provider === "google-flow" ? "Google Flow" : "ChatGPT";
   taskId.textContent = task?.id ?? "未领取";
   status.textContent = task?.status ?? "—";
   detail.textContent = task
-    ? `${task.taskType} · ${task.attachments.length ? `附件 ${task.attachments.length} 张` : "仅文字"} · ${task.target.chatMode === "existing" ? "已有对话" : "新对话"}`
+    ? `${provider}${task.target.outputCount ? ` ×${task.target.outputCount}` : ""} · ${task.taskType} · ${task.attachments.length ? `附件 ${task.attachments.length} 张` : "仅文字"} · ${task.target.chatMode === "existing" ? "已有页面" : "新页面"}`
     : "启动 P1 服务后创建一条任务。";
+  openButton.textContent = task ? `在 ${provider} 打开任务 →` : "打开任务 →";
   openButton.disabled = !task;
 }
 
@@ -61,7 +67,7 @@ element<HTMLButtonElement>("save").addEventListener("click", async () => {
 element<HTMLButtonElement>("claim").addEventListener("click", async () => {
   try {
     const response = await send("popup-claim"); if (!response.ok) throw new Error(response.error);
-    render(response.task); show("任务已领取。下一步打开绑定的 ChatGPT 标签页。");
+    render(response.task); show("任务已领取。下一步打开与任务匹配的生成页。");
   } catch (error) { show(error instanceof Error ? error.message : "领取任务失败", true); }
 });
 

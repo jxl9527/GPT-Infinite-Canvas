@@ -1,0 +1,4 @@
+interface:
+  display_name: "D5 AI 画布工作流"
+  short_description: "安全导入项目文件并按授权执行 D5 三阶段画布批处理"
+  default_prompt: "Use $run-d5-canvas-workflow to scan my project folder and run the authorized D5 canvas stage safely."

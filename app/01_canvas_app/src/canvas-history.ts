@@ -1,9 +1,11 @@
 import type { AnnotationState } from "./annotation-model.js";
 import type { ImageNodeState } from "./canvas-layout.js";
+import type { CanvasTextCard } from "./text-card.js";
 
 export interface CanvasHistorySnapshot {
   nodes: ImageNodeState[];
   annotations: AnnotationState[];
+  textCards: CanvasTextCard[];
   structureBaseId: string | null;
   styleReferenceId: string | null;
   taskInstruction: string;
@@ -25,7 +27,8 @@ function cloneSnapshot(snapshot: CanvasHistorySnapshot): CanvasHistorySnapshot {
   return {
     ...snapshot,
     nodes: snapshot.nodes.map((node) => ({ ...node })),
-    annotations: snapshot.annotations.map((annotation) => structuredClone(annotation))
+    annotations: snapshot.annotations.map((annotation) => structuredClone(annotation)),
+    textCards: snapshot.textCards.map((card) => ({ ...card }))
   };
 }
 

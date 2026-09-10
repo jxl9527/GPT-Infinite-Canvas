@@ -18,6 +18,7 @@ export interface BridgeServerOptions {
   token: string;
   allowedOrigins?: readonly string[];
   canvasOrigins?: readonly string[];
+  selectProjectFolder?: () => Promise<string | null>;
 }
 
 type JsonObject = Record<string, unknown>;
@@ -128,6 +129,7 @@ export function createBridgeServer(options: BridgeServerOptions): Server {
         send(response, 200, {
           ok: true,
           schemaVersion: "1.0",
+          releaseVersion: "0.5.3",
           activeProjectId: current?.id ?? null,
           activeTaskId: current?.store.getActive()?.id ?? null
         });
@@ -190,6 +192,12 @@ export function createBridgeServer(options: BridgeServerOptions): Server {
         });
         return;
       }
+      const deleteProjectId = url.pathname.match(/^\/api\/v1\/workbench\/projects\/([^/]+)\/delete$/)?.[1];
+      if (request.method === "POST" && deleteProjectId) {
+        const deleted = await options.projects.deleteProject(decodeURIComponent(deleteProjectId));
+        send(response, 200, { ok: true, deleted });
+        return;
+      }
 
       const project = options.projects.current();
       if (!project) throw new ProtocolError("TASK_LOCKED", "请先在项目工作台选择或新建项目");
@@ -210,11 +218,171 @@ export function createBridgeServer(options: BridgeServerOptions): Server {
       if (request.method === "GET" && url.pathname === "/api/v1/canvas/assets") {
         send(response, 200, { ok: true, assets: project.canvasAssets.list() }); return;
       }
+      if (request.method === "GET" && url.pathname === "/api/v1/canvas/codex-capabilities") {
+        const canvasProject = project.canvasProject.read();
+        send(response, 200, {
+          ok: true,
+          capabilities: {
+            schemaVersion: "1.0",
+            bridgeVersion: "0.5.3",
+            pluginProtocolVersion: "1.0",
+            activeProjectId: project.id,
+            canvasProjectLoaded: Boolean(canvasProject),
+            canvasRevision: typeof canvasProject?.revision === "number" ? canvasProject.revision : null,
+            sourcePolicy: "read-only-copy-import",
+            supportedStages: ["preflight", "scene-optimization", "final-glass"],
+            supportedTools: [
+              "d5_get_capabilities",
+              "d5_scan_project_folder",
+              "d5_import_manifest",
+              "d5_get_workflow_state",
+              "d5_create_run",
+              "d5_register_text_card",
+              "d5_get_run_item_inputs",
+              "d5_mark_generation_submitted",
+              "d5_register_generated_result",
+              "d5_pause_run",
+              "d5_resume_run",
+              "d5_handoff_run_items"
+            ],
+            automaticFinalSelection: false,
+            arbitraryFileWrite: false,
+            arbitraryCommandExecution: false
+          }
+        });
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/v1/canvas/folder-manifests/scan") {
+        const body = await readJson(request);
+        if (!isRecord(body)) throw new ProtocolError("INVALID_INPUT", "项目文件夹扫描请求必须是 JSON 对象");
+        const manifest = await project.folderManifests.scan(body.sourceRoot, body.includeSubfolders);
+        send(response, 201, { ok: true, manifest }); return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/v1/canvas/folder-manifests/select-folder") {
+        if (!options.selectProjectFolder) {
+          throw new ProtocolError("INVALID_INPUT", "本地服务未启用系统文件夹选择器，请粘贴绝对路径");
+        }
+        const sourceRoot = await options.selectProjectFolder();
+        send(response, 200, { ok: true, sourceRoot, cancelled: sourceRoot === null }); return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/v1/canvas/codex-runs") {
+        const body = await readJson(request, 2 * 1_048_576);
+        if (!isRecord(body)) throw new ProtocolError("INVALID_INPUT", "Codex 批次创建请求必须是 JSON 对象");
+        if (typeof body.manifestId === "string" && body.manifestId.trim()) {
+          const manifest = await project.folderManifests.read(body.manifestId);
+          if (body.sourceFolder !== manifest.sourceRoot) {
+            throw new ProtocolError("TASK_LOCKED", "授权单源文件夹与已确认清单不一致");
+          }
+        }
+        const result = await project.canvasProject.createCodexRun(body);
+        await project.diagnostics.log({
+          event: result.deduplicated ? "codex-run-deduplicated" : "codex-run-created",
+          message: `${String(result.run.id)} ${String(result.run.workflowStage)}`
+        });
+        send(response, result.deduplicated ? 200 : 201, { ok: true, ...result }); return;
+      }
+      const codexRunMatch = url.pathname.match(/^\/api\/v1\/canvas\/codex-runs\/([^/]+)\/(text-cards|pause|resume)$/);
+      if (request.method === "POST" && codexRunMatch) {
+        const runId = decodeURIComponent(codexRunMatch[1] ?? "");
+        const operation = codexRunMatch[2];
+        const body = await readJson(request, 2 * 1_048_576);
+        if (!isRecord(body)) throw new ProtocolError("INVALID_INPUT", "Codex 批次操作请求必须是 JSON 对象");
+        if (operation === "text-cards") {
+          const result = await project.canvasProject.registerCodexTextCard({ ...body, runId });
+          await project.diagnostics.log({
+            event: result.deduplicated ? "codex-text-card-deduplicated" : "codex-text-card-registered",
+            message: `${runId} ${String(result.card.id)}`
+          });
+          send(response, result.deduplicated ? 200 : 201, { ok: true, ...result }); return;
+        }
+        const result = await project.canvasProject.transitionCodexRun({
+          ...body,
+          runId,
+          action: operation === "pause" ? "pause" : "resume"
+        });
+        await project.diagnostics.log({ event: `codex-run-${operation}`, message: runId });
+        send(response, 200, { ok: true, ...result }); return;
+      }
+      const codexItemMatch = url.pathname.match(/^\/api\/v1\/canvas\/codex-runs\/([^/]+)\/items\/([^/]+)\/(inputs|generation-submitted|generated-results)$/);
+      if (codexItemMatch) {
+        const runId = decodeURIComponent(codexItemMatch[1] ?? "");
+        const itemId = decodeURIComponent(codexItemMatch[2] ?? "");
+        const operation = codexItemMatch[3];
+        if (request.method === "GET" && operation === "inputs") {
+          send(response, 200, { ok: true, item: project.canvasProject.readCodexRunItemInputs({ runId, itemId }) }); return;
+        }
+        if (request.method === "POST" && operation === "generation-submitted") {
+          const body = await readJson(request);
+          if (!isRecord(body)) throw new ProtocolError("INVALID_INPUT", "Codex 生图提交请求必须是 JSON 对象");
+          const result = await project.canvasProject.markCodexGenerationSubmitted({ ...body, runId, itemId });
+          await project.diagnostics.log({
+            event: result.deduplicated ? "codex-generation-submit-deduplicated" : "codex-generation-submitted",
+            message: `${runId} ${itemId}`
+          });
+          send(response, result.deduplicated ? 200 : 201, { ok: true, ...result }); return;
+        }
+        if (request.method === "POST" && operation === "generated-results") {
+          const body = await readJson(request);
+          if (!isRecord(body)) throw new ProtocolError("INVALID_INPUT", "Codex 结果登记请求必须是 JSON 对象");
+          const asset = typeof body.assetId === "string" ? project.canvasAssets.get(body.assetId) : undefined;
+          if (!asset) throw new ProtocolError("TASK_NOT_FOUND", "Codex 生成结果资产不存在");
+          const result = await project.canvasProject.registerCodexGeneratedResult({ ...body, runId, itemId }, asset);
+          await project.diagnostics.log({
+            event: result.deduplicated ? "codex-generated-result-deduplicated" : "codex-generated-result-registered",
+            message: `${runId} ${itemId} ${result.versionId} ${String(result.validation.passed)}`
+          });
+          send(response, result.deduplicated ? 200 : 201, { ok: true, ...result }); return;
+        }
+      }
+      const codexHandoffRunId = url.pathname.match(/^\/api\/v1\/canvas\/codex-runs\/([^/]+)\/handoff$/)?.[1];
+      if (request.method === "POST" && codexHandoffRunId) {
+        const body = await readJson(request);
+        if (!isRecord(body)) throw new ProtocolError("INVALID_INPUT", "A/B 接管请求必须是 JSON 对象");
+        const runId = decodeURIComponent(codexHandoffRunId);
+        const result = await project.canvasProject.handoffRun({ ...body, runId });
+        await project.diagnostics.log({ event: "workflow-run-handoff", message: `${runId} ${String(result.run.runner)}` });
+        send(response, 200, { ok: true, ...result }); return;
+      }
+      const folderManifestMatch = url.pathname.match(/^\/api\/v1\/canvas\/folder-manifests\/([^/]+)(?:\/(import))?$/);
+      if (folderManifestMatch) {
+        const manifestId = decodeURIComponent(folderManifestMatch[1] ?? "");
+        if (request.method === "GET" && !folderManifestMatch[2]) {
+          send(response, 200, { ok: true, manifest: await project.folderManifests.read(manifestId) }); return;
+        }
+        if (request.method === "POST" && folderManifestMatch[2] === "import") {
+          const body = await readJson(request);
+          if (!isRecord(body)) throw new ProtocolError("INVALID_INPUT", "项目文件夹导入请求必须是 JSON 对象");
+          const imported = await project.folderManifests.importManifest(manifestId, body.selectedRelativePaths);
+          send(response, imported.completed ? 201 : 207, { ok: imported.completed, import: imported }); return;
+        }
+      }
+      if (request.method === "GET" && url.pathname === "/api/v1/canvas/delivery-target") {
+        send(response, 200, { ok: true, target: await project.delivery.readTarget() }); return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/v1/canvas/delivery-target") {
+        const body = await readJson(request);
+        if (!isRecord(body)) throw new ProtocolError("INVALID_INPUT", "批量导出目录请求必须是 JSON 对象");
+        send(response, 200, { ok: true, target: await project.delivery.saveTarget(body.targetDirectory) }); return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/v1/canvas/final-glass/batch-export") {
+        const body = await readJson(request);
+        if (!isRecord(body) || !Array.isArray(body.selections)) {
+          throw new ProtocolError("INVALID_INPUT", "最终玻璃批量导出请求必须包含 selections 数组");
+        }
+        const result = await project.delivery.exportSelected(body.selections);
+        send(response, result.completed ? 201 : 207, { ok: result.completed, export: result }); return;
+      }
       if (request.method === "GET" && url.pathname === "/api/v1/canvas/project") {
         send(response, 200, { ok: true, project: project.canvasProject.read() }); return;
       }
+      if (request.method === "POST" && url.pathname === "/api/v1/canvas/project/conflict-draft") {
+        const body = await readJson(request, 32 * 1_048_576);
+        if (!isRecord(body)) throw new ProtocolError("INVALID_INPUT", "冲突草稿保存请求必须是 JSON 对象");
+        const recovered = await project.canvasProject.preserveConflictDraft(body.project);
+        send(response, 201, { ok: true, ...recovered }); return;
+      }
       if (request.method === "POST" && url.pathname === "/api/v1/canvas/project") {
-        const body = await readJson(request, 8 * 1_048_576);
+        const body = await readJson(request, 32 * 1_048_576);
         if (!isRecord(body)) throw new ProtocolError("INVALID_INPUT", "画布项目保存请求必须是 JSON 对象");
         const saved = await project.canvasProject.save(body.project, body.forceSnapshot === true);
         send(response, 200, { ok: true, ...saved }); return;
@@ -292,7 +460,7 @@ export function createBridgeServer(options: BridgeServerOptions): Server {
         return;
       }
 
-      const match = url.pathname.match(/^\/api\/v1\/tasks\/([^/]+)(?:\/(claim|status|handoff|results|complete)|\/attachments\/([^/]+))?$/);
+      const match = url.pathname.match(/^\/api\/v1\/tasks\/([^/]+)(?:\/(claim|status|handoff|results|text-result|complete)|\/attachments\/([^/]+))?$/);
       if (!match) throw new ProtocolError("TASK_NOT_FOUND", "接口不存在");
       const id = decodeURIComponent(match[1] ?? ""); const action = match[2]; const attachmentId = match[3];
       const task = project.store.get(id);
@@ -307,6 +475,12 @@ export function createBridgeServer(options: BridgeServerOptions): Server {
         const body = await readJson(request, 60 * 1_048_576);
         if (!isRecord(body)) throw new ProtocolError("INVALID_INPUT", "结果请求体必须是 JSON 对象");
         const stored = await project.results.saveDataUrl(id, body.dataUrl, "visible-page");
+        send(response, stored.deduplicated ? 200 : 201, { ok: true, ...stored }); return;
+      }
+      if (action === "text-result") {
+        const body = await readJson(request, 256 * 1_024);
+        if (!isRecord(body)) throw new ProtocolError("INVALID_INPUT", "文字结果请求体必须是 JSON 对象");
+        const stored = await project.results.saveText(id, body.text, "visible-page");
         send(response, stored.deduplicated ? 200 : 201, { ok: true, ...stored }); return;
       }
 

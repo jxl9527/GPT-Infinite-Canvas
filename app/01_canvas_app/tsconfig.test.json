@@ -9,5 +9,5 @@
     "rootDir": ".",
     "outDir": ".test-dist"
   },
-  "include": ["src/canvas-math.ts", "src/canvas-layout.ts", "src/canvas-input.ts", "src/canvas-automation.ts", "src/annotation-model.ts", "src/task-preview.ts", "src/project-state.ts", "test/**/*.ts"]
+  "include": ["src/canvas-math.ts", "src/canvas-layout.ts", "src/canvas-input.ts", "src/canvas-automation.ts", "src/canvas-node-index.ts", "src/canvas-object-navigation.ts", "src/annotation-model.ts", "src/task-preview.ts", "src/project-state.ts", "src/viewpoint-name.ts", "src/workbench-panel.ts", "test/**/*.ts"]
 }

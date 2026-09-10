@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "d5_ai_canvas": {
+      "title": "D5 AI Canvas Local Bridge",
+      "description": "Authorized domain tools for the local D5 architectural image canvas.",
+      "command": "node",
+      "args": ["./scripts/start-mcp.mjs"],
+      "cwd": "."
+    }
+  }
+}

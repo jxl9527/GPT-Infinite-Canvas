@@ -16,7 +16,7 @@ $process = Get-CimInstance Win32_Process -Filter "ProcessId = $servicePid"
 if (-not $process) {
     throw "PID $servicePid 已不存在；请人工核对 PID 文件。"
 }
-if ($process.ExecutablePath -notmatch '[\\/]node\.exe$' -or $process.CommandLine -notmatch 'dist/src/main\.js') {
+if ($process.ExecutablePath -notmatch '[\\/]node\.exe$' -or $process.CommandLine -notmatch 'dist[\\/]src[\\/]main\.js') {
     throw "PID $servicePid 与预期 P1 Node 服务不符，拒绝停止。"
 }
 

@@ -7,9 +7,11 @@ import {
   assertGenerationTask,
   canTransition,
   isTerminalStatus,
+  responseModeOf,
   type CreateTaskInput,
   type EventActor,
   type GenerationResult,
+  type GenerationTextResult,
   type GenerationStatus,
   type GenerationTask,
   type HandoffRecord,
@@ -83,6 +85,7 @@ export class TaskStore {
         id: taskId(now),
         idempotencyKey: randomUUID(),
         taskType: input.taskType,
+        responseMode: input.responseMode ?? "image",
         target: clone(input.target),
         prompt: input.prompt,
         attachments: clone(attachments),
@@ -138,15 +141,33 @@ export class TaskStore {
     });
   }
 
+  async addTextResult(id: string, result: GenerationTextResult): Promise<{ result: GenerationTextResult; deduplicated: boolean }> {
+    return this.exclusive(async () => {
+      const task = this.requiredInternal(id);
+      if (task.status !== "collecting") throw new ProtocolError("RESULT_STATE_REJECTED", "只有 collecting 状态可以写入文字结果");
+      if (task.textResult) return { result: clone(task.textResult), deduplicated: true };
+      task.textResult = clone(result); task.updatedAt = new Date().toISOString();
+      await this.persist(task);
+      return { result: clone(result), deduplicated: false };
+    });
+  }
+
   async complete(id: string, by: EventActor = "extension"): Promise<GenerationTask> {
     return this.exclusive(async () => {
       const task = this.requiredInternal(id);
       if (task.status !== "collecting" && task.status !== "returning") {
         throw new ProtocolError("RESULT_STATE_REJECTED", "只有 collecting 或 returning 状态可以完成任务");
       }
-      if (!task.results.length) throw new ProtocolError("RECOVERY_REQUIRED", "没有本地结果，不能完成任务");
+      const responseMode = responseModeOf(task);
+      const hasImage = task.results.length > 0;
+      const hasText = Boolean(task.textResult);
+      if (responseMode === "image" && !hasImage) throw new ProtocolError("RECOVERY_REQUIRED", "没有本地图片结果，不能完成任务");
+      if (responseMode === "text" && !hasText) throw new ProtocolError("RECOVERY_REQUIRED", "没有本地文字结果，不能完成任务");
+      if (responseMode === "image-or-text" && !hasImage && !hasText) {
+        throw new ProtocolError("RECOVERY_REQUIRED", "没有本地图片或文字结果，不能完成任务");
+      }
       await this.verifyResultFiles(task);
-      return clone(await this.transitionInternal(task, "completed", by, "结果已回收至本地任务目录"));
+      return clone(await this.transitionInternal(task, "completed", by, hasImage ? "图片结果已回收至本地任务目录" : "文字结论已回收至本地任务目录"));
     });
   }
 
@@ -208,6 +229,18 @@ export class TaskStore {
       }
       const sha256 = createHash("sha256").update(await readFile(absolute)).digest("hex");
       if (sha256 !== result.sha256) throw new ProtocolError("RECOVERY_REQUIRED", `结果文件哈希不匹配：${result.filename}`);
+    }
+    if (task.textResult) {
+      const absolute = resolve(this.projectRoot, task.textResult.relativePath);
+      if (!(absolute === resultRoot || absolute.startsWith(`${resultRoot}${sep}`))) {
+        throw new ProtocolError("RECOVERY_REQUIRED", "文字结果路径不在当前任务目录内");
+      }
+      const file = await stat(absolute).catch(() => null);
+      if (!file?.isFile() || file.size !== task.textResult.bytes) {
+        throw new ProtocolError("RECOVERY_REQUIRED", "文字结果文件缺失或大小不匹配");
+      }
+      const sha256 = createHash("sha256").update(await readFile(absolute)).digest("hex");
+      if (sha256 !== task.textResult.sha256) throw new ProtocolError("RECOVERY_REQUIRED", "文字结果文件哈希不匹配");
     }
   }
 

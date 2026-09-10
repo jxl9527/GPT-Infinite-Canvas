@@ -7,8 +7,46 @@ import { fileURLToPath } from "node:url";
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const workspaceRoot = resolve(appRoot, "..");
-const version = process.argv[2] ?? "0.3.0";
+const packageMetadata = JSON.parse(await readFile(join(appRoot, "package.json"), "utf8"));
+const commandArguments = process.argv.slice(2);
+const validateOnly = commandArguments.includes("--validate-only");
+const requestedVersion = commandArguments.find((argument) => argument !== "--validate-only");
+const version = requestedVersion ?? packageMetadata.version;
 if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error(`版本号无效：${version}`);
+if (version !== packageMetadata.version) {
+  throw new Error(`请求打包版本 ${version} 与 app/package.json ${packageMetadata.version} 不一致；请先完成正式版本升级`);
+}
+
+async function assertVersionMarkers(relativePath, pattern) {
+  const content = await readFile(join(appRoot, relativePath), "utf8");
+  const found = [...content.matchAll(pattern)].map((match) => match[1]);
+  if (!found.length || found.some((candidate) => candidate !== version)) {
+    throw new Error(`${relativePath} 的发布版本面不一致：${found.join(", ") || "未找到"}`);
+  }
+}
+
+await assertVersionMarkers("02_bridge_service/src/server.ts", /(?:releaseVersion|bridgeVersion):\s*"(\d+\.\d+\.\d+)"/g);
+await assertVersionMarkers("02_bridge_service/src/main.ts", /releaseVersion:\s*"(\d+\.\d+\.\d+)"/g);
+await assertVersionMarkers("02_bridge_service/src/main.ts", /GPT Canvas Bridge (\d+\.\d+\.\d+) listening/g);
+await assertVersionMarkers("05_installer_and_ops/Start-GPTInfiniteCanvas-Chrome.ps1", /\$expectedReleaseVersion\s*=\s*'(\d+\.\d+\.\d+)'/g);
+await assertVersionMarkers("05_installer_and_ops/Install-GPTInfiniteCanvas-DesktopLauncher.ps1", /version="(\d+\.\d+\.\d+)"/g);
+await assertVersionMarkers("05_installer_and_ops/Install-GPTInfiniteCanvas-DesktopLauncher.ps1", /GPT Infinite Canvas (\d+\.\d+\.\d+)｜浏览器人工批量／Codex 自动运行/g);
+await assertVersionMarkers("06_codex_integration/d5-ai-canvas/mcp-server/server.mjs", /name:\s*"d5-ai-canvas",\s*version:\s*"(\d+\.\d+\.\d+)"/g);
+const pluginMetadata = JSON.parse(await readFile(join(appRoot, "06_codex_integration", "d5-ai-canvas", "package.json"), "utf8"));
+const pluginLockMetadata = JSON.parse(await readFile(join(appRoot, "06_codex_integration", "d5-ai-canvas", "package-lock.json"), "utf8"));
+const pluginDescriptor = JSON.parse(await readFile(join(appRoot, "06_codex_integration", "d5-ai-canvas", ".codex-plugin", "plugin.json"), "utf8"));
+if (
+  pluginMetadata.version !== version
+  || pluginLockMetadata.version !== version
+  || pluginLockMetadata.packages?.[""]?.version !== version
+  || pluginDescriptor.version !== version
+) {
+  throw new Error(`Codex 插件版本面与发布版本 ${version} 不一致`);
+}
+if (validateOnly) {
+  process.stdout.write(`${JSON.stringify({ valid: true, releaseVersion: version, versionSurfaces: 10 }, null, 2)}\n`);
+  process.exit(0);
+}
 const bundleName = `GPT_Infinite_Canvas_${version}`;
 const releaseRoot = join(workspaceRoot, "releases");
 const temporaryRoot = await mkdtemp(join(tmpdir(), "gpt-infinite-canvas-release-"));
@@ -47,6 +85,7 @@ try {
     const readme = join(sourceRoot, "README.md");
     if ((await stat(readme).catch(() => null))?.isFile()) await copy(readme, join(targetRoot, "README.md"));
   }
+  await copy(join(appRoot, "06_codex_integration"), join(bundleRoot, "06_codex_integration"));
   const packagedSharedRoot = join(bundleRoot, "node_modules", "@gpt-canvas", "shared");
   await copy(
     join(appRoot, "04_shared_packages", "package.json"),
@@ -67,7 +106,8 @@ try {
     "Stop-GPTCanvas.vbs",
     "Backup-P1Project.ps1",
     "Restore-P1Project.ps1",
-    "Export-P1Diagnostics.ps1"
+    "Export-P1Diagnostics.ps1",
+    "Install-D5AICanvas-CodexPlugin.ps1"
   ]) {
     await copy(
       join(appRoot, "05_installer_and_ops", name),
@@ -90,6 +130,14 @@ try {
   if (runtimeDependencyCheck.status !== 0) {
     throw new Error(runtimeDependencyCheck.stderr || "发布包共享运行库解析失败");
   }
+  const pluginProbe = spawnSync(
+    process.execPath,
+    ["scripts/probe-mcp.mjs"],
+    { cwd: join(bundleRoot, "06_codex_integration", "d5-ai-canvas"), encoding: "utf8", windowsHide: true }
+  );
+  if (pluginProbe.status !== 0) {
+    throw new Error(pluginProbe.stderr || "发布包 Codex MCP 协议探针失败");
+  }
   const files = [];
   for (const path of (await filesRecursively(bundleRoot)).sort()) {
     const bytes = await readFile(path);
@@ -107,6 +155,8 @@ try {
     entrypoint: "05_installer_and_ops/Start-GPTInfiniteCanvas-Chrome.vbs",
     desktopInstaller: "05_installer_and_ops/Install-GPTInfiniteCanvas-DesktopLauncher.cmd",
     desktopInstallerScript: "05_installer_and_ops/Install-GPTInfiniteCanvas-DesktopLauncher.ps1",
+    codexPluginInstaller: "05_installer_and_ops/Install-D5AICanvas-CodexPlugin.ps1",
+    codexPlugin: "06_codex_integration/d5-ai-canvas",
     legacyEntrypoint: "05_installer_and_ops/Start-GPTCanvas.vbs",
     endpoints: {
       canvas: "http://127.0.0.1:3230",

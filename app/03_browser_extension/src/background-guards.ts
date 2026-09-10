@@ -1,4 +1,11 @@
-import { isTerminalStatus, type GenerationStatus, type GenerationTask } from "./protocol.js";
+import {
+  generationProviderOf,
+  isGenerationPageUrl,
+  isGoogleFlowUrl,
+  isTerminalStatus,
+  type GenerationStatus,
+  type GenerationTask
+} from "./protocol.js";
 
 export const ADAPTER_STATUS_EVENTS = {
   "upload-started": "uploading",
@@ -28,7 +35,7 @@ export function isTrustedTaskMessage(
     && typeof messageTaskId === "string"
     && messageTaskId === task.id
     && typeof senderTabId === "number"
-    && isChatGptUrl(senderUrl)
+    && isTaskGenerationUrl(task, senderUrl)
     && typeof messageBindingId === "string"
     && messageBindingId.length >= 16
     && messageBindingId === storedBindingId
@@ -41,6 +48,21 @@ export function isChatGptUrl(value: string | undefined): boolean {
     const url = new URL(value);
     return url.protocol === "https:" && (url.hostname === "chatgpt.com" || url.hostname === "chat.openai.com");
   } catch { return false; }
+}
+
+export function isFlowUrl(value: string | undefined): boolean {
+  return Boolean(value && isGoogleFlowUrl(value));
+}
+
+export function isSupportedGenerationUrl(value: string | undefined): boolean {
+  return isChatGptUrl(value) || isFlowUrl(value);
+}
+
+export function isTaskGenerationUrl(
+  task: GenerationTask | null | undefined,
+  value: string | undefined
+): boolean {
+  return Boolean(task && value && isGenerationPageUrl(value, generationProviderOf(task.target)));
 }
 
 export function isCanvasTriggerUrl(value: string | undefined): boolean {
@@ -58,7 +80,7 @@ export function isBindableTaskPage(
   senderTabId: number | undefined,
   senderUrl: string | undefined
 ): boolean {
-  return Boolean(task && !isTerminalStatus(task.status) && typeof senderTabId === "number" && isChatGptUrl(senderUrl));
+  return Boolean(task && !isTerminalStatus(task.status) && typeof senderTabId === "number" && isTaskGenerationUrl(task, senderUrl));
 }
 
 export function isAutoBindableTaskPage(
@@ -66,10 +88,10 @@ export function isAutoBindableTaskPage(
   senderTabId: number | undefined,
   senderUrl: string | undefined
 ): boolean {
-  return Boolean(task?.status === "opening-chat" && typeof senderTabId === "number" && isChatGptUrl(senderUrl));
+  return Boolean(task?.status === "opening-chat" && typeof senderTabId === "number" && isTaskGenerationUrl(task, senderUrl));
 }
 
 export function shouldFocusChatForHandoff(reason: unknown): boolean {
   if (typeof reason !== "string") return false;
-  return /(登录|登入|未登录|网页验证|安全验证|login|log in|sign in|verification|verify)/i.test(reason);
+  return /(登录|登入|未登录|网页验证|安全验证|创建或打开一个项目|Flow.{0,12}项目|login|log in|sign in|verification|verify)/i.test(reason);
 }

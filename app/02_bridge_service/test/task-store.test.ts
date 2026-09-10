@@ -76,6 +76,26 @@ test("服务重启后恢复未完成任务及已提交锁", async () => {
   await assert.rejects(() => recovered.create(input, []), (error) => error instanceof ProtocolError && error.code === "TASK_LOCKED");
 });
 
+test("文字审查任务保存结论后可以完成且不要求图片", async () => {
+  const { root, store } = await temporaryStore();
+  const task = await store.create({ ...input, responseMode: "text" }, []);
+  await store.claim(task.id, "test"); await store.transition(task.id, "ready-to-submit", "test");
+  await store.transition(task.id, "submitted", "test"); await store.transition(task.id, "collecting", "test");
+  const text = "## 阶段一结论\n\n建议保留A视角，并轻微增加焦距。\n";
+  const bytes = Buffer.from(text, "utf8");
+  const resultRoot = join(root, "runs", task.id, "results"); await mkdir(resultRoot, { recursive: true });
+  await writeFile(join(resultRoot, "assistant-response.md"), bytes);
+  await store.addTextResult(task.id, {
+    id: randomUUID(), createdAt: new Date().toISOString(), text: text.trim(), bytes: bytes.byteLength,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+    relativePath: `runs/${task.id}/results/assistant-response.md`, source: "visible-page"
+  });
+  const completed = await store.complete(task.id, "test");
+  assert.equal(completed.status, "completed");
+  assert.equal(completed.results.length, 0);
+  assert.match(completed.textResult?.text ?? "", /建议保留A视角/);
+});
+
 test("用户可结束已提交任务并创建下一项任务", async () => {
   const { store } = await temporaryStore();
   const task = await store.create(input, []);

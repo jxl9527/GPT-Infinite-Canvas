@@ -3,9 +3,13 @@ import test from "node:test";
 import type { CanvasImageAsset } from "@gpt-canvas/shared";
 import type { ImageNodeState } from "../src/canvas-layout.js";
 import {
+  canvasRevisionRequiresSave,
   buildCanvasProjectDocument,
-  restoreCanvasProjectStructure
+  createViewpointStatusCard,
+  restoreCanvasProjectStructure,
+  sanitizeCanvasWorkflowReferences
 } from "../src/project-state.js";
+import type { CanvasProjectDocument } from "../src/project-state.js";
 
 const asset: CanvasImageAsset = {
   id: "asset_00000000-0000-0000-0000-000000000001",
@@ -41,6 +45,8 @@ const node: ImageNodeState = {
   outputRatio: "free"
 };
 
+const longPromptText = `【最终生成提示词】\n${"保持建筑结构、道路关系和原始视角不变。".repeat(220)}`;
+
 test("项目保存与恢复保持节点、批注和版本引用", () => {
   const project = buildCanvasProjectDocument({
     projectId: "project_00000000-0000-0000-0000-000000000001",
@@ -61,7 +67,60 @@ test("项目保存与恢复保持节点、批注和版本引用", () => {
     }],
     assets: [asset],
     generationTask: null,
-    taskParentVersionId: null
+    taskParentVersionId: null,
+    workflow: {
+      activeViewpointId: "viewpoint_00000000-0000-0000-0000-000000000001",
+      batchRun: {
+        id: "batch_00000000-0000-0000-0000-000000000001",
+        status: "ready",
+        prompt: "批量提示词",
+        styleReferenceVersionId: null,
+        targetChatUrl: "",
+        items: [{
+          id: "batch_item_00000000-0000-0000-0000-000000000001",
+          sourceVersionId: node.versionId,
+          sourceName: node.name,
+          status: "queued",
+          taskId: null,
+          resultVersionIds: [],
+          error: ""
+        }],
+        createdAt: "2026-07-23T01:00:00.000Z",
+        updatedAt: "2026-07-23T01:00:00.000Z"
+      },
+      customGptUrl: "https://chatgpt.com/g/g-architect-review",
+      customGptEnabled: false,
+      textCards: [{
+        id: "text_card_00000000-0000-0000-0000-000000000001",
+        kind: "prompt",
+        title: "1人视｜生成提示词",
+        text: longPromptText,
+        x: 820,
+        y: 234,
+        width: 460,
+        height: 360,
+        sourceVersionId: node.versionId,
+        taskId: "task_00000000-0000-0000-0000-000000000001",
+        createdAt: "2026-07-23T01:00:00.000Z",
+        updatedAt: "2026-07-23T01:00:00.000Z"
+      }],
+      viewpoints: [{
+        ...createViewpointStatusCard({
+        id: "viewpoint_00000000-0000-0000-0000-000000000001",
+        name: "1人视",
+        purpose: "主入口投标主图",
+        stage: "scene-optimization",
+        d5Batch: "D5_01",
+        sourceVersionId: node.versionId,
+        updatedAt: "2026-07-23T01:00:00.000Z"
+        }),
+        status: "in-progress",
+        conclusion: "构图已锁定",
+        nextAction: "继续D5材质深化",
+        updatedAt: "2026-07-23T01:00:00.000Z"
+      }],
+      handoffs: []
+    }
   });
   const restored = restoreCanvasProjectStructure(project);
   assert.deepEqual(restored.viewport, { x: 72, y: 54, scale: 0.74 });
@@ -69,6 +128,24 @@ test("项目保存与恢复保持节点、批注和版本引用", () => {
   assert.equal(restored.imageNodes[0]?.versionId, node.versionId);
   assert.equal(restored.annotations[0]?.type, "text");
   assert.equal(project.versions[0]?.assetId, asset.id);
+  assert.equal(restored.workflow.viewpoints[0]?.name, "1人视");
+  assert.equal(restored.workflow.viewpoints[0]?.sourceVersionId, node.versionId);
+  assert.equal(restored.workflow.customGptUrl, "https://chatgpt.com/g/g-architect-review");
+  assert.equal(restored.workflow.customGptEnabled, false);
+  assert.equal(project.workflow?.batchRun?.targetChatUrl, null);
+  assert.equal(restored.workflow.batchRun?.targetChatUrl, null);
+  assert.equal(restored.workflow.batchRun?.runner, "manual");
+  assert.equal(restored.workflow.batchRun?.authorization, null);
+  assert.equal(restored.workflow.batchRun?.items[0]?.runner, "manual");
+  assert.equal(restored.workflow.batchRun?.items[0]?.attemptCount, 0);
+  assert.equal(
+    restored.workflow.batchRun?.items[0]?.idempotencyKey,
+    "legacy:batch_00000000-0000-0000-0000-000000000001:batch_item_00000000-0000-0000-0000-000000000001"
+  );
+  assert.equal(restored.workflow.textCards[0]?.kind, "prompt");
+  assert.equal(restored.workflow.textCards[0]?.text, longPromptText);
+  assert.equal(project.schemaVersion, "2.0");
+  assert.equal(restored.workflow.viewpoints[0]?.sceneOptimization.structureBaseVersionId, node.versionId);
   assert.equal(new Set(project.canvas.nodes.map((entry) => entry.id)).size, project.canvas.nodes.length);
   assert.match(project.canvas.nodes[1]?.id ?? "", /^node_annotation_/);
 });
@@ -84,6 +161,141 @@ test("未登记资产不得保存到项目", () => {
     annotations: [],
     assets: [],
     generationTask: null,
-    taskParentVersionId: null
+    taskParentVersionId: null,
+    workflow: { activeViewpointId: null, viewpoints: [], handoffs: [], batchRun: null, customGptUrl: "", customGptEnabled: false, textCards: [] }
   }), /节点资产未登记/);
+});
+
+test("删除候选图片后清理V3视角列表与文字卡失效引用", () => {
+  const missingVersionId = "version_00000000-0000-0000-0000-000000000099";
+  const viewpoint = createViewpointStatusCard({
+    name: "1人视",
+    stage: "scene-optimization",
+    sourceVersionId: node.versionId
+  });
+  viewpoint.sceneOptimization.candidateVersionIds = [missingVersionId];
+  viewpoint.sceneOptimization.status = "generated";
+  const workflow = sanitizeCanvasWorkflowReferences({
+    activeViewpointId: viewpoint.id,
+    viewpoints: [viewpoint],
+    handoffs: [],
+    batchRun: null,
+    customGptUrl: "",
+    customGptEnabled: false,
+    textCards: [{
+      id: "text_card_00000000-0000-0000-0000-000000000099",
+      kind: "review",
+      title: "已删除候选的说明",
+      text: "保留文字，但解除失效图片来源。",
+      x: 100,
+      y: 100,
+      width: 320,
+      height: 200,
+      sourceVersionId: missingVersionId,
+      taskId: "task_00000000-0000-0000-0000-000000000099",
+      createdAt: "2026-08-10T00:00:00.000Z",
+      updatedAt: "2026-08-10T00:00:00.000Z"
+    }]
+  }, new Set([node.versionId]));
+  assert.deepEqual(workflow.viewpoints[0]?.sceneOptimization.candidateVersionIds, []);
+  assert.equal(workflow.viewpoints[0]?.sceneOptimization.status, "pending");
+  assert.equal(workflow.textCards[0]?.sourceVersionId, null);
+});
+
+test("项目保存前自动整理已删除候选的悬空引用", () => {
+  const missingVersionId = "version_00000000-0000-0000-0000-000000000098";
+  const viewpoint = createViewpointStatusCard({
+    name: "1人视",
+    stage: "scene-optimization",
+    sourceVersionId: node.versionId
+  });
+  viewpoint.sceneOptimization.candidateVersionIds = [missingVersionId];
+  const project = buildCanvasProjectDocument({
+    projectId: "project_00000000-0000-0000-0000-000000000001",
+    title: "删除候选后保存",
+    createdAt: "2026-08-10T00:00:00.000Z",
+    revision: 2,
+    viewport: { x: 0, y: 0, scale: 1 },
+    nodes: [node],
+    annotations: [],
+    assets: [asset],
+    generationTask: null,
+    taskParentVersionId: null,
+    workflow: {
+      activeViewpointId: viewpoint.id,
+      viewpoints: [viewpoint],
+      handoffs: [],
+      batchRun: null,
+      customGptUrl: "",
+      customGptEnabled: false,
+      textCards: []
+    }
+  });
+  assert.deepEqual(project.workflow?.viewpoints[0]?.sceneOptimization.candidateVersionIds, []);
+});
+
+test("旧四阶段项目迁移为V3三阶段且保留项目数据", () => {
+  const legacy = buildCanvasProjectDocument({
+    projectId: "project_00000000-0000-0000-0000-000000000001",
+    title: "旧项目迁移",
+    createdAt: "2026-07-23T00:00:00.000Z",
+    revision: 3,
+    viewport: { x: 0, y: 0, scale: 1 },
+    nodes: [node],
+    annotations: [],
+    assets: [asset],
+    generationTask: null,
+    taskParentVersionId: null,
+    workflow: { activeViewpointId: null, viewpoints: [], handoffs: [], batchRun: null, customGptUrl: "", customGptEnabled: false, textCards: [] }
+  });
+  legacy.schemaVersion = "1.0";
+  legacy.workflow = {
+    activeViewpointId: "viewpoint_legacy",
+    viewpoints: [{
+      id: "viewpoint_legacy",
+      name: "1人视",
+      purpose: "主入口",
+      stage: "stage-2",
+      status: "in-progress",
+      d5Batch: "D5_01",
+      sourceVersionId: node.versionId,
+      selectedVersionId: null,
+      conclusion: "补充入口窗框",
+      nextAction: "返回SU",
+      updatedAt: "2026-07-23T01:00:00.000Z"
+    }],
+    handoffs: [{
+      id: "handoff_legacy",
+      viewpointId: "viewpoint_legacy",
+      viewpointName: "1人视",
+      stage: "stage-4",
+      status: "in-progress",
+      target: "photoshop",
+      d5Batch: "D5_01",
+      sourceVersionId: node.versionId,
+      selectedVersionId: null,
+      taskId: null,
+      conclusion: "玻璃待处理",
+      nextAction: "旧流程",
+      createdAt: "2026-07-23T01:00:00.000Z"
+    }],
+    batchRun: null,
+    customGptUrl: "",
+    customGptEnabled: false,
+    textCards: []
+  } as unknown as CanvasProjectDocument["workflow"];
+  const restored = restoreCanvasProjectStructure(legacy);
+  assert.equal(restored.imageNodes.length, 1);
+  assert.equal(restored.workflow.viewpoints[0]?.stage, "preflight");
+  assert.equal(restored.workflow.viewpoints[0]?.preflight.d5ViewVersionId, node.versionId);
+  assert.equal(restored.workflow.viewpoints[0]?.conclusion, "补充入口窗框");
+  assert.equal(restored.workflow.handoffs[0]?.stage, "final-glass");
+  assert.equal(restored.workflow.handoffs[0]?.target, "review");
+});
+
+test("恢复权威版本后不重复保存同一修订，实际编辑和强制快照仍会保存", () => {
+  assert.equal(canvasRevisionRequiresSave(6, 6), false);
+  assert.equal(canvasRevisionRequiresSave(5, 6), false);
+  assert.equal(canvasRevisionRequiresSave(7, 6), true);
+  assert.equal(canvasRevisionRequiresSave(6, 6, true), true);
 });

@@ -1,9 +1,13 @@
 import type {
   CanvasImageAsset,
   CreateTaskInput,
-  GenerationTask
+  ExportRecord,
+  GenerationTask,
+  ProjectFolderImportResult,
+  ProjectFolderManifest
 } from "@gpt-canvas/shared";
 import type { CanvasProjectDocument } from "./project-state";
+import type { CanvasBatchRun, WorkflowStage } from "./project-state";
 
 const BRIDGE_BASE_URL = (import.meta.env.VITE_BRIDGE_BASE_URL as string | undefined)?.replace(/\/$/, "")
   ?? "http://127.0.0.1:3220";
@@ -13,6 +17,18 @@ interface ApiErrorBody {
     code?: string;
     message?: string;
   };
+}
+
+export class BridgeApiError extends Error {
+  readonly code: string;
+  readonly status: number;
+
+  constructor(message: string, code: string, status: number) {
+    super(message);
+    this.name = "BridgeApiError";
+    this.code = code;
+    this.status = status;
+  }
 }
 
 export interface WorkbenchProject {
@@ -70,11 +86,47 @@ export interface PromptLibraryItem {
   updatedAt: string;
 }
 
+export interface DeliveryTarget {
+  schemaVersion: "2.0";
+  targetDirectory: string;
+  configuredAt: string;
+  updatedAt: string;
+}
+
+export interface FinalGlassBatchExport {
+  targetDirectory: string;
+  records: ExportRecord[];
+  exported: number;
+  deduplicated: number;
+  failed: number;
+  completed: boolean;
+  logRelativePath: string;
+}
+
+export interface CodexCanvasCapabilities {
+  schemaVersion: "1.0";
+  bridgeVersion: string;
+  pluginProtocolVersion: string;
+  activeProjectId: string;
+  canvasProjectLoaded: boolean;
+  canvasRevision: number | null;
+  sourcePolicy: "read-only-copy-import";
+  supportedStages: Array<Exclude<WorkflowStage, "completed">>;
+  supportedTools: string[];
+  automaticFinalSelection: false;
+  arbitraryFileWrite: false;
+  arbitraryCommandExecution: false;
+}
+
 let sessionToken: string | null = null;
 
 async function apiError(response: Response): Promise<Error> {
   const body = await response.json().catch(() => ({})) as ApiErrorBody;
-  return new Error(body.error?.message || `本地文件服务返回 ${response.status}`);
+  return new BridgeApiError(
+    body.error?.message || `本地文件服务返回 ${response.status}`,
+    body.error?.code || "UNKNOWN",
+    response.status
+  );
 }
 
 export async function connectCanvasSession(): Promise<string> {
@@ -174,6 +226,41 @@ export async function updateActiveProjectRequirements(
   return body.requirements;
 }
 
+export async function readDeliveryTarget(): Promise<DeliveryTarget | null> {
+  const response = await authenticatedFetch("/api/v1/canvas/delivery-target");
+  if (!response.ok) throw await apiError(response);
+  const body = await response.json() as { target?: DeliveryTarget | null };
+  return body.target ?? null;
+}
+
+export async function saveDeliveryTarget(targetDirectory: string): Promise<DeliveryTarget> {
+  const response = await authenticatedFetch("/api/v1/canvas/delivery-target", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ targetDirectory })
+  });
+  if (!response.ok) throw await apiError(response);
+  const body = await response.json() as { target?: DeliveryTarget };
+  if (!body.target) throw new Error("本地服务未返回批量导出目录");
+  return body.target;
+}
+
+export async function exportFinalGlassSelections(selections: readonly {
+  assetId: string;
+  versionId: string;
+  viewpointName: string;
+}[]): Promise<FinalGlassBatchExport> {
+  const response = await authenticatedFetch("/api/v1/canvas/final-glass/batch-export", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ selections })
+  });
+  if (!response.ok && response.status !== 207) throw await apiError(response);
+  const body = await response.json() as { export?: FinalGlassBatchExport };
+  if (!body.export) throw new Error("本地服务未返回最终玻璃批量导出结果");
+  return body.export;
+}
+
 export async function activateWorkbenchProject(projectId: string): Promise<WorkbenchProject> {
   const response = await authenticatedFetch(
     `/api/v1/workbench/projects/${encodeURIComponent(projectId)}/activate`,
@@ -183,6 +270,23 @@ export async function activateWorkbenchProject(projectId: string): Promise<Workb
   const body = await response.json() as { project?: WorkbenchProject };
   if (!body.project) throw new Error("本地服务未返回已选择项目");
   return body.project;
+}
+
+export async function deleteWorkbenchProject(projectId: string): Promise<{
+  id: string;
+  name: string;
+  trashRelativeLocation: string;
+}> {
+  const response = await authenticatedFetch(
+    `/api/v1/workbench/projects/${encodeURIComponent(projectId)}/delete`,
+    { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }
+  );
+  if (!response.ok) throw await apiError(response);
+  const body = await response.json() as {
+    deleted?: { id: string; name: string; trashRelativeLocation: string };
+  };
+  if (!body.deleted) throw new Error("本地服务未返回项目删除结果");
+  return body.deleted;
 }
 
 export async function listPromptLibrary(): Promise<PromptLibraryItem[]> {
@@ -262,12 +366,20 @@ export async function saveGeneratedAsset(
 export async function downloadOriginalAsset(assetId: string, originalName: string): Promise<void> {
   const response = await authenticatedFetch(`/api/v1/canvas/assets/${encodeURIComponent(assetId)}/original`);
   if (!response.ok) throw await apiError(response);
-  const url = URL.createObjectURL(await response.blob());
+  const blob = await response.blob();
+  if (!blob.size) throw new Error("原图文件为空，无法下载");
+  const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
   anchor.download = originalName;
-  anchor.click();
-  window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+  anchor.style.display = "none";
+  document.body.append(anchor);
+  try {
+    anchor.click();
+  } finally {
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  }
 }
 
 export async function createGenerationTask(input: CreateTaskInput): Promise<GenerationTask> {
@@ -337,6 +449,133 @@ export async function listCanvasAssets(): Promise<CanvasImageAsset[]> {
   if (!response.ok) throw await apiError(response);
   const body = await response.json() as { assets?: CanvasImageAsset[] };
   return body.assets ?? [];
+}
+
+export async function scanProjectFolder(
+  sourceRoot: string,
+  includeSubfolders = false
+): Promise<ProjectFolderManifest> {
+  const response = await authenticatedFetch("/api/v1/canvas/folder-manifests/scan", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sourceRoot, includeSubfolders })
+  });
+  if (!response.ok) throw await apiError(response);
+  return (await response.json() as { manifest: ProjectFolderManifest }).manifest;
+}
+
+export async function selectProjectFolder(): Promise<string | null> {
+  const response = await authenticatedFetch("/api/v1/canvas/folder-manifests/select-folder", {
+    method: "POST"
+  });
+  if (!response.ok) throw await apiError(response);
+  const body = await response.json() as { sourceRoot?: string | null };
+  return typeof body.sourceRoot === "string" && body.sourceRoot.trim() ? body.sourceRoot : null;
+}
+
+export async function readProjectFolderManifest(id: string): Promise<ProjectFolderManifest> {
+  const response = await authenticatedFetch(`/api/v1/canvas/folder-manifests/${encodeURIComponent(id)}`);
+  if (!response.ok) throw await apiError(response);
+  return (await response.json() as { manifest: ProjectFolderManifest }).manifest;
+}
+
+export async function importProjectFolderManifest(
+  id: string,
+  selectedRelativePaths?: readonly string[]
+): Promise<ProjectFolderImportResult> {
+  const response = await authenticatedFetch(`/api/v1/canvas/folder-manifests/${encodeURIComponent(id)}/import`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ...(selectedRelativePaths ? { selectedRelativePaths } : {}) })
+  });
+  const body = await response.json().catch(() => ({})) as {
+    error?: { message?: string };
+    import?: ProjectFolderImportResult;
+  };
+  if (!response.ok && response.status !== 207) {
+    throw new Error(body.error?.message || `本地文件服务返回 ${response.status}`);
+  }
+  if (!body.import) throw new Error("本地文件服务未返回导入结果");
+  return body.import;
+}
+
+export async function readCodexCanvasCapabilities(): Promise<CodexCanvasCapabilities> {
+  const response = await authenticatedFetch("/api/v1/canvas/codex-capabilities");
+  if (!response.ok) throw await apiError(response);
+  const body = await response.json() as { capabilities?: CodexCanvasCapabilities };
+  if (!body.capabilities) throw new Error("本地服务未返回 Codex 能力信息");
+  return body.capabilities;
+}
+
+export async function createCodexCanvasRun(input: {
+  authorizationId: string;
+  manifestId?: string;
+  sourceFolder: string | null;
+  stage: Exclude<WorkflowStage, "completed">;
+  action: "analyze" | "prompt" | "generate";
+  sourceVersionIds: readonly `version_${string}`[];
+  styleReferenceVersionId?: `version_${string}` | null;
+  prompt?: string;
+  maximumGenerations: number;
+  allowManualFallback: boolean;
+  stopOnStructureRisk: boolean;
+  approvedAt: string;
+  confirmed: true;
+}): Promise<{
+  project: CanvasProjectDocument;
+  run: CanvasBatchRun;
+  snapshotRelativePath: string | null;
+  deduplicated: boolean;
+}> {
+  const response = await authenticatedFetch("/api/v1/canvas/codex-runs", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input)
+  });
+  if (!response.ok) throw await apiError(response);
+  return response.json() as Promise<{
+    project: CanvasProjectDocument;
+    run: CanvasBatchRun;
+    snapshotRelativePath: string | null;
+    deduplicated: boolean;
+  }>;
+}
+
+export async function transitionCodexCanvasRun(
+  runId: string,
+  action: "pause" | "resume"
+): Promise<{ project: CanvasProjectDocument; run: CanvasBatchRun; snapshotRelativePath: string | null }> {
+  const response = await authenticatedFetch(
+    `/api/v1/canvas/codex-runs/${encodeURIComponent(runId)}/${action}`,
+    { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }
+  );
+  if (!response.ok) throw await apiError(response);
+  return response.json() as Promise<{
+    project: CanvasProjectDocument;
+    run: CanvasBatchRun;
+    snapshotRelativePath: string | null;
+  }>;
+}
+
+export async function handoffCanvasRun(
+  runId: string,
+  targetRunner: "manual" | "codex",
+  reason: string
+): Promise<{ project: CanvasProjectDocument; run: CanvasBatchRun; snapshotRelativePath: string | null }> {
+  const response = await authenticatedFetch(
+    `/api/v1/canvas/codex-runs/${encodeURIComponent(runId)}/handoff`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ targetRunner, reason, confirmed: true })
+    }
+  );
+  if (!response.ok) throw await apiError(response);
+  return response.json() as Promise<{
+    project: CanvasProjectDocument;
+    run: CanvasBatchRun;
+    snapshotRelativePath: string | null;
+  }>;
 }
 
 export async function readCanvasAssetAsDataUrl(
@@ -420,6 +659,24 @@ export async function saveCanvasProject(
   return response.json() as Promise<{
     project: CanvasProjectDocument;
     snapshotRelativePath: string | null;
+  }>;
+}
+
+export async function preserveCanvasConflictDraft(
+  project: CanvasProjectDocument
+): Promise<{
+  currentProject: CanvasProjectDocument;
+  conflictRelativePath: string;
+}> {
+  const response = await authenticatedFetch("/api/v1/canvas/project/conflict-draft", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ project })
+  });
+  if (!response.ok) throw await apiError(response);
+  return response.json() as Promise<{
+    currentProject: CanvasProjectDocument;
+    conflictRelativePath: string;
   }>;
 }
 

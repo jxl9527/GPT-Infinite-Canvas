@@ -16,6 +16,7 @@ $resolvedOutputRoot = if ($OutputRoot) { [IO.Path]::GetFullPath($OutputRoot) } e
 $tokenPath = Join-Path $resolvedRuntimeRoot 'bridge-token.txt'
 if (-not (Test-Path -LiteralPath $tokenPath -PathType Leaf)) { throw "未找到本地令牌：$tokenPath" }
 $token = (Get-Content -LiteralPath $tokenPath -Raw).Trim()
+$health = Invoke-RestMethod -Method Get -Uri "$($ApiRoot.TrimEnd('/'))/health"
 
 $response = Invoke-RestMethod -Method Post -Uri "$($ApiRoot.TrimEnd('/'))/api/v1/diagnostics/export" -Headers @{ 'x-bridge-token' = $token }
 if (-not $response.ok -or -not $response.diagnostic.relativePath) { throw '服务未返回有效诊断文件信息。' }
@@ -34,10 +35,22 @@ while (Test-Path -LiteralPath $destination) {
     $index++
 }
 Copy-Item -LiteralPath $source -Destination $destination
+$pluginValidation = $null
+$pluginInstaller = Join-Path $PSScriptRoot 'Install-D5AICanvas-CodexPlugin.ps1'
+if (Test-Path -LiteralPath $pluginInstaller -PathType Leaf) {
+    try {
+        $pluginValidation = (& $pluginInstaller -ValidateOnly | Out-String) | ConvertFrom-Json
+    }
+    catch {
+        $pluginValidation = [pscustomobject]@{ Valid = $false; Error = $_.Exception.Message }
+    }
+}
 [pscustomobject]@{
     Exported = $true
     File = $destination
     Bytes = (Get-Item -LiteralPath $destination).Length
     SHA256 = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
     TokenIncluded = $false
+    BridgeVersion = $health.releaseVersion
+    CodexPlugin = $pluginValidation
 } | ConvertTo-Json

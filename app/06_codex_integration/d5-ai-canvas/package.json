@@ -1,0 +1,16 @@
+{
+  "name": "@d5-ai-canvas/codex-plugin-runtime",
+  "version": "0.5.3",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "probe": "node ./scripts/probe-mcp.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "zod": "4.4.3"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

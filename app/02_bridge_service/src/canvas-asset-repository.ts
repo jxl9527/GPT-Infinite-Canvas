@@ -150,6 +150,15 @@ export class CanvasAssetRepository {
     return this.saveDataUrl("imported", name, dataUrl);
   }
 
+  async importVerifiedFile(
+    name: string,
+    sourcePath: string,
+    mime: ImageMime
+  ): Promise<{ asset: CanvasImageAsset; deduplicated: boolean }> {
+    const bytes = await readFile(sourcePath);
+    return this.saveDataUrl("imported", name, `data:${mime};base64,${bytes.toString("base64")}`);
+  }
+
   async saveAnnotationExport(name: unknown, dataUrl: unknown): Promise<{ asset: CanvasImageAsset; deduplicated: boolean }> {
     return this.saveDataUrl("annotation-export", name, dataUrl);
   }
