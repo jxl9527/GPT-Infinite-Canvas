@@ -24,6 +24,7 @@ namespace GPTCanvasContent {
     isSendReady(): boolean;
     isGenerating(): boolean;
     isResponseComplete?(): boolean;
+    hasResponseCompletionSignal?(): boolean;
     generationFailureReason?(): string | null;
     completedWithoutGeneratedImage?(): boolean;
     waitForComposer(timeoutMs?: number): Promise<HTMLElement>;
@@ -105,6 +106,22 @@ namespace GPTCanvasContent {
     const normalized = response.trim();
     return !generating
       && completionSignal
+      && normalized.length >= 20
+      && textResponseHasRequiredSections(prompt, normalized);
+  }
+
+  export function stalledTextResponseReady(
+    prompt: string,
+    response: string,
+    generating: boolean,
+    completionSignal: boolean,
+    stableForMs: number,
+    requiredStableMs = 30_000
+  ): boolean {
+    const normalized = response.trim();
+    return generating
+      && completionSignal
+      && stableForMs >= requiredStableMs
       && normalized.length >= 20
       && textResponseHasRequiredSections(prompt, normalized);
   }

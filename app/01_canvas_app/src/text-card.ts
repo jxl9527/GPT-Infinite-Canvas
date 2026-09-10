@@ -89,7 +89,7 @@ export function createCanvasTextCard(input: {
     kind: input.kind,
     title: input.title.trim().slice(0, 120) || (input.kind === "prompt" ? "生成提示词" : "GPT审查结论"),
     text: normalizeReturnedText(input.text),
-    x: source ? source.x + source.width + 72 : 160,
+    x: source ? source.x - width - 72 : 160,
     y: source ? source.y + siblingOffset : 140 + siblingOffset,
     width,
     height,
@@ -169,15 +169,49 @@ export function inferTextCardWorkflowLabel(input: {
 }
 
 export function extractFinalPrompt(text: string): string {
-  const normalized = text.trim();
+  const normalized = normalizeReturnedText(text);
   if (!normalized) return "";
-  const marker = /(?:^|\n)【最终(?:生成)?提示词】\s*\n?/;
-  const match = marker.exec(normalized);
-  if (!match || match.index === undefined) return normalized;
-  const start = match.index + match[0].length;
-  const remainder = normalized.slice(start);
-  const nextSection = /\n【[^】]+】/.exec(remainder);
-  return remainder.slice(0, nextSection?.index ?? remainder.length).trim() || normalized;
+  const finalSection = parseReturnedTextSections(normalized)
+    .find((section) => /^最终(?:生成)?提示词$/.test(section.title.replace(/\s+/g, "")));
+  return stripAssistantConversationTail(finalSection?.content.trim() || normalized);
+}
+
+export function stripAssistantConversationTail(text: string): string {
+  let cleaned = text.trim();
+  const patterns = [
+    /(^|[。！？!?\n])\s*(?:你|您)(?:喜欢|觉得|认为|希望|想要|需要)[\s\S]{0,100}(?:吗|呢)[？?]\s*$/u,
+    /(^|[。！？!?\n])\s*(?:是否|需要|要不要|还需要|需不需要)(?:我)?[\s\S]{0,120}[？?]\s*$/u,
+    /(^|[。！？!?\n])\s*(?:(?:如果|如)(?:你|您)?(?:愿意|需要|希望)|(?:你|您)(?:如果|若)(?:愿意|需要|希望))[\s\S]{0,180}(?:我可以|我会|可以继续|可以为你|可以帮你)[\s\S]*$/u,
+    /(^|[。！？!?\n])\s*(?:请)?(?:告诉我|告知我)[\s\S]{0,120}$/u
+  ] as const;
+  for (let pass = 0; pass < 3; pass += 1) {
+    const match = patterns.map((pattern) => pattern.exec(cleaned)).find(Boolean);
+    if (!match || match.index === undefined) break;
+    const boundary = match[1] ?? "";
+    cleaned = cleaned.slice(0, match.index + boundary.length).trim();
+  }
+  return cleaned;
+}
+
+export function extractImageGenerationPrompt(text: string): string {
+  const normalized = normalizeReturnedText(text);
+  if (!normalized) return "";
+  const sections = parseReturnedTextSections(normalized);
+  const finalSection = sections.find((section) => (
+    /^最终(?:生成)?提示词$/.test(section.title.replace(/\s+/g, ""))
+  ));
+  if (!finalSection?.content.trim()) return normalized;
+  const prohibitionSection = sections.find((section) => (
+    /^(?:必须保持与禁止改变|禁止项|禁止改变|负面约束)$/.test(section.title.replace(/\s+/g, ""))
+  ));
+  const finalContent = stripAssistantConversationTail(finalSection.content);
+  const prohibitionContent = stripAssistantConversationTail(prohibitionSection?.content ?? "");
+  return [
+    `【最终生成提示词】\n${finalContent}`,
+    prohibitionContent
+      ? `【${prohibitionSection?.title.trim()}】\n${prohibitionContent}`
+      : ""
+  ].filter(Boolean).join("\n\n");
 }
 
 export function aspectRatiosMatch(

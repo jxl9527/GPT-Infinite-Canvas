@@ -351,10 +351,15 @@ async function collectResults(): Promise<void> {
   }
 }
 
-async function collectTextResult(): Promise<void> {
+async function collectTextResult(allowStalledComplete = false): Promise<void> {
   if (!bridge || !submitted) { setStatus("请先完成本轮单次提交。", "error"); return; }
   const text = adapter.collectAssistantText?.().trim() ?? "";
-  if (!textResponseReady(text)) {
+  const stalledCompleteAccepted = allowStalledComplete
+    && adapter.isGenerating()
+    && Boolean(adapter.hasResponseCompletionSignal?.())
+    && text.length >= 20
+    && GPTCanvasContent.textResponseHasRequiredSections(bridge.task.prompt, text);
+  if (!textResponseReady(text) && !stalledCompleteAccepted) {
     setStatus("本轮文字回复仍在生成或缺少必需章节，请等待完整回复后再回收。", "error");
     return;
   }
@@ -388,7 +393,7 @@ async function collectCurrentResponse(): Promise<void> {
   const mode = responseMode();
   const sources = await GPTCanvasContent.filterNewSources(adapter.collectGeneratedImages(), baselineHashes);
   if (mode !== "text" && sources.length) return collectResults();
-  if (mode !== "image" && (adapter.collectAssistantText?.().trim().length ?? 0) >= 2) return collectTextResult();
+  if (mode !== "image" && (adapter.collectAssistantText?.().trim().length ?? 0) >= 2) return collectTextResult(true);
   setStatus(mode === "image" ? "未识别到本轮新增图片。" : "尚未识别到可回收的本轮结果。", "error");
 }
 
@@ -417,7 +422,7 @@ async function observeAndCollect(): Promise<void> {
   if (!bridge || !submitted || observing || bridge.task.status === "completed") return;
   observing = true;
   const deadline = Date.now() + 10 * 60_000;
-  let previous = ""; let stablePolls = 0; let textOnlyStablePolls = 0; let previousText = "";
+  let previous = ""; let stablePolls = 0; let textOnlyStablePolls = 0; let previousText = ""; let textStableSince = 0;
   try {
     setStatus("正在观察本轮生成状态；完成后将自动收图…");
     while (Date.now() < deadline && bridge && bridge.task.status !== "completed") {
@@ -427,6 +432,16 @@ async function observeAndCollect(): Promise<void> {
       const signature = [...sources].sort().join("\n");
       const mode = responseMode();
       const assistantText = adapter.collectAssistantText?.().trim() ?? "";
+      const now = Date.now();
+      if (!assistantText || assistantText !== previousText) textStableSince = now;
+      const stalledTextReady = mode !== "image"
+        && GPTCanvasContent.stalledTextResponseReady(
+          bridge.task.prompt,
+          assistantText,
+          adapter.isGenerating(),
+          Boolean(adapter.hasResponseCompletionSignal?.()),
+          assistantText === previousText ? now - textStableSince : 0
+        );
       if (mode === "image"
         && sandboxPathRecoveryAttempted
         && GPTCanvasContent.containsSandboxImagePath(assistantText)
@@ -442,6 +457,11 @@ async function observeAndCollect(): Promise<void> {
         if (stablePolls >= 3) { await collectResults(); return; }
       } else {
         stablePolls = 0; previous = signature;
+        if (stalledTextReady) {
+          setStatus("ChatGPT 完成状态异常，但完整文字已持续稳定，正在安全回收…");
+          await collectTextResult(true);
+          return;
+        }
         textOnlyStablePolls = textResponseReady(assistantText)
           ? assistantText === previousText ? textOnlyStablePolls + 1 : 1
           : 0;

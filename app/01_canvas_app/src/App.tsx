@@ -117,13 +117,18 @@ import {
   browserAutomationOwnsBatch,
   codexStageAutomationPlan,
   createCanvasBatchRun,
+  createPromptCardGenerationBatchRun,
   createStageCanvasBatchRun,
   defaultWorkflowAction,
   nextQueuedBatchItem,
+  promptCardBatchReady,
+  promptForBatchItem,
+  resolvePromptCardBatchPairs,
   selectCodexCanvasSources,
   updateBatchItem,
   WORKFLOW_ACTION_LABELS,
   WORKFLOW_STAGE_ACTIONS,
+  type PromptCardBatchPair,
   type WorkflowAction
 } from "./batch-queue";
 import {
@@ -181,7 +186,7 @@ import {
   type CanvasObjectGroup
 } from "./canvas-object-navigation";
 import { CanvasObjectNavigator } from "./CanvasObjectNavigator";
-import { ViewpointTaskCenter, type UtilityPanelWidth } from "./ViewpointTaskCenter";
+import { ViewpointTaskCenter } from "./ViewpointTaskCenter";
 import { TaskStartLauncher } from "./TaskStartLauncher";
 import {
   TASK_START_DISMISSED_STORAGE_KEY,
@@ -220,6 +225,7 @@ import {
   buildPromptOptimizerInput,
   createCanvasTextCard,
   extractFinalPrompt,
+  extractImageGenerationPrompt,
   inferTextCardWorkflowLabel,
   nextWorkflowActionForTextCard,
   normalizeReturnedText,
@@ -236,14 +242,53 @@ type ServiceState = "connecting" | "connected" | "offline";
 type SaveState = "loading" | "saving" | "saved" | "error";
 type ImportLayout = "cascade" | "vertical";
 type CodexStartSource = "canvas" | "folder";
-const UTILITY_PANEL_WIDTH_STORAGE_KEY = "gpt-canvas:utility-panel-width:v1";
-
 interface SaveConflictState {
   localProject: CanvasProjectDocument;
   remoteProject: CanvasProjectDocument;
   sourceLabel: string;
   detectedAt: string;
   message: string;
+}
+
+function PromptCardBatchPanel({
+  pairs,
+  busy,
+  onStart
+}: {
+  pairs: readonly PromptCardBatchPair[];
+  busy: boolean;
+  onStart: () => void;
+}) {
+  const readyCount = pairs.filter((pair) => !pair.issue).length;
+  const ready = promptCardBatchReady(pairs);
+  return (
+    <section className="prompt-card-batch-panel" data-ready={ready || undefined}>
+      <header>
+        <span>
+          <small>ONE-TO-ONE PROMPT BATCH</small>
+          <strong>批量按已返回提示词生成</strong>
+        </span>
+        <em>{pairs.length ? `${readyCount}/${pairs.length} 已就绪` : "等待框选"}</em>
+      </header>
+      {pairs.length ? (
+        <ul>
+          {pairs.map((pair, index) => (
+            <li key={pair.source.versionId} data-ready={!pair.issue || undefined}>
+              <span>{String(index + 1).padStart(2, "0")}</span>
+              <strong title={pair.source.name}>{pair.source.name}</strong>
+              <small title={pair.issue || pair.promptCard?.title}>{pair.issue || pair.promptCard?.title}</small>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p>先在画布空白处框选需要生成的原图；系统会逐张核对其绑定提示词卡。</p>
+      )}
+      <button type="button" disabled={!ready || busy} onClick={onStart}>
+        {busy ? "当前任务处理中" : ready ? `确认并串行生成 ${pairs.length} 张` : "提示词配对尚未就绪"}
+      </button>
+      <p>每张原图使用自己的提示词快照；启动后不会因编辑其他文字卡而串词。</p>
+    </section>
+  );
 }
 
 function projectUpdateSource(project: CanvasProjectDocument): string {
@@ -830,7 +875,7 @@ function CanvasTextCardNode({
   const [actionPending, setActionPending] = useState<"copy" | "save" | null>(null);
   const [actionFeedback, setActionFeedback] = useState("");
   const activeSection = sections.find((section) => section.id === activeSectionId) ?? sections[0] ?? null;
-  const nextTaskText = card.kind === "prompt" ? extractFinalPrompt(normalizedText) : normalizedText;
+  const nextTaskText = card.kind === "prompt" ? extractImageGenerationPrompt(normalizedText) : normalizedText;
   const workflowLabel = card.workflowLabel ?? inferTextCardWorkflowLabel({ kind: card.kind, prompt: normalizedText });
   const saveLabel = saveState === "saving" ? "正在自动保存"
     : saveState === "error" ? "保存失败"
@@ -1067,11 +1112,11 @@ function CanvasTextCardNode({
             type="button"
             className="text-card-primary"
             disabled={!nextTaskText}
-            onClick={() => {
-              onUse(nextTaskText);
-              announceFeedback("已设为下一步输入");
-            }}
-          >{card.kind === "prompt" ? "载入原图输入框" : "作为下一步输入"} <span aria-hidden="true">→</span></button>
+              onClick={() => {
+                onUse(nextTaskText);
+                announceFeedback(card.kind === "prompt" ? "已载入最终提示词与禁止项" : "已设为下一步输入");
+              }}
+          >{card.kind === "prompt" ? "载入提示词与禁止项" : "作为下一步输入"} <span aria-hidden="true">→</span></button>
         </div>
       </footer>
       <button
@@ -1283,15 +1328,6 @@ function readTaskStartDismissed(): boolean {
   }
 }
 
-function readUtilityPanelWidth(): UtilityPanelWidth {
-  try {
-    const value = window.localStorage.getItem(UTILITY_PANEL_WIDTH_STORAGE_KEY);
-    return value === "compact" || value === "wide" ? value : "standard";
-  } catch {
-    return "standard";
-  }
-}
-
 export function App({
   projectName,
   onBackToProjects
@@ -1403,7 +1439,6 @@ export function App({
   const [workbenchHeight, setWorkbenchHeight] = useState<number | null>(readSavedWorkbenchHeight);
   const [workbenchWidth, setWorkbenchWidth] = useState<number | null>(readSavedWorkbenchWidth);
   const [taskStartDismissed, setTaskStartDismissed] = useState(readTaskStartDismissed);
-  const [utilityPanelWidth, setUtilityPanelWidth] = useState<UtilityPanelWidth>(readUtilityPanelWidth);
   const [resizingWorkbench, setResizingWorkbench] = useState(false);
   const stageRef = useRef<Konva.Stage>(null);
   const middlePanningRef = useRef(false);
@@ -1614,6 +1649,10 @@ export function App({
     () => selectedNodesInCanvasOrder(nodes, selectedNodeIds),
     [nodes, selectedNodeIds]
   );
+  const promptCardBatchPairs = useMemo(
+    () => resolvePromptCardBatchPairs(selectedBatchNodes, viewpoints, textCards),
+    [selectedBatchNodes, textCards, viewpoints]
+  );
   const preparedCodexCanvasSources = useMemo(() => batchSourceVersionIds
     .map((versionId) => nodeIndex.byVersionId.get(versionId) ?? null)
     .filter((node): node is ImageNodeState => Boolean(node)), [batchSourceVersionIds, nodeIndex]);
@@ -1699,6 +1738,13 @@ export function App({
   const selectedAnnotation = annotations.find((annotation) => annotation.id === selectedAnnotationId) ?? null;
   const structureBase = structureBaseId ? nodeIndex.byId.get(structureBaseId) ?? null : null;
   const styleReference = styleReferenceId ? nodeIndex.byId.get(styleReferenceId) ?? null : null;
+  const promptCardBatchStyleReference = useMemo(() => {
+    if (styleReference) return styleReference;
+    const inferredIds = [...new Set(promptCardBatchPairs
+      .map((pair) => pair.styleReferenceVersionId)
+      .filter((versionId): versionId is `version_${string}` => Boolean(versionId)))];
+    return inferredIds.length === 1 ? nodeIndex.byVersionId.get(inferredIds[0]!) ?? null : null;
+  }, [nodeIndex, promptCardBatchPairs, styleReference]);
   const contextMode = selectionContextMode(selectedBatchNodes.length, selectedTextCardIds.length);
   const singleTaskSource = contextMode === "single" ? selectedBatchNodes[0] ?? null : structureBase;
   const activeViewpoint = viewpoints.find((viewpoint) => viewpoint.id === activeViewpointId) ?? null;
@@ -3479,15 +3525,6 @@ export function App({
     window.requestAnimationFrame(() => imageInputRef.current?.click());
   }, [changeBulkStage, dismissTaskStart]);
 
-  const changeUtilityPanelWidth = useCallback((width: UtilityPanelWidth) => {
-    setUtilityPanelWidth(width);
-    try {
-      window.localStorage.setItem(UTILITY_PANEL_WIDTH_STORAGE_KEY, width);
-    } catch {
-      // The chosen width remains active for the current session.
-    }
-  }, []);
-
   const updateTextCard = useCallback((id: CanvasTextCard["id"], patch: Partial<CanvasTextCard>) => {
     setTextCards((current) => current.map((card) => card.id === id
       ? { ...card, ...patch, updatedAt: new Date().toISOString() }
@@ -3531,7 +3568,7 @@ export function App({
       : item));
     setRevision((current) => current + 1);
     setNotice(card.kind === "prompt"
-      ? "提示词已载入原图输入框；已切换为“按提示词生成图片”，确认后再发送。"
+      ? "最终生成提示词与禁止项已载入原图输入框；D5调整建议仅保留在文字卡中供设计复核。已切换为“按提示词生成图片”，确认后再发送。"
       : "审查文字已进入下一步；已切换为“生成／优化提示词”。");
   }, [nodeIndex]);
 
@@ -3941,6 +3978,73 @@ export function App({
   const applyBulkStage = useCallback(() => {
     applyStageToNodes(selectedBatchNodes, bulkStage);
   }, [applyStageToNodes, bulkStage, selectedBatchNodes]);
+
+  const sendPromptCardBatchToGpt = useCallback(() => {
+    if (executionMode !== "manual") {
+      setNotice("请先切换到“浏览器人工批量”再提交提示词卡批次。");
+      return;
+    }
+    if (!generationTargetReady) {
+      setNotice("已选择专属 GPT，但地址尚未配置；请切回普通 GPT 或补充地址。");
+      return;
+    }
+    if (!automationReady) {
+      setNotice("浏览器批量通道尚未就绪，请先确认扩展已连接。");
+      return;
+    }
+    if (
+      generationActive
+      || generationResultsPending
+      || creatingTask
+      || returningResults
+      || (batchRun && batchRun.status !== "completed")
+    ) {
+      setNotice("当前仍有任务或批次未结束，请完成或清除后再建立提示词卡批次。");
+      return;
+    }
+    if (!promptCardBatchReady(promptCardBatchPairs)) {
+      const missing = promptCardBatchPairs.filter((pair) => pair.issue);
+      setNotice(missing.length
+        ? `无法开始：${missing.map((pair) => `${pair.source.name}（${pair.issue}）`).join("；")}`
+        : "请先框选至少一张已返回提示词的原图。");
+      return;
+    }
+    try {
+      const run = createPromptCardGenerationBatchRun({
+        pairs: promptCardBatchPairs,
+        styleReference: promptCardBatchStyleReference,
+        targetChatUrl: activeTargetChatUrl
+      });
+      applyStageToNodes(promptCardBatchPairs.map((pair) => pair.source), "scene-optimization", false);
+      const usedCardIds = new Set(run.items.flatMap((item) => item.inputTextCardId ? [item.inputTextCardId] : []));
+      setTextCards((current) => current.map((card) => usedCardIds.has(card.id)
+        ? { ...card, handoffState: "used", updatedAt: new Date().toISOString() }
+        : card));
+      setLoadedTextCardId(null);
+      setBatchSourceVersionIds(run.items.map((item) => item.sourceVersionId));
+      setBatchRun({ ...run, status: "running", updatedAt: new Date().toISOString() });
+      setBulkStage("scene-optimization");
+      setWorkflowAction("generate");
+      setGenerationMode("reference-edit");
+      setRevision((current) => current + 1);
+      setNotice(`已建立 ${run.items.length} 个一一对应生图任务；每张原图的提示词已冻结，队列将严格逐张执行。`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "提示词卡批次建立失败");
+    }
+  }, [
+    activeTargetChatUrl,
+    applyStageToNodes,
+    automationReady,
+    batchRun,
+    creatingTask,
+    executionMode,
+    generationActive,
+    generationResultsPending,
+    generationTargetReady,
+    promptCardBatchPairs,
+    returningResults,
+    promptCardBatchStyleReference
+  ]);
 
   const updateSelectedNodeWorkflow = useCallback((patch: Partial<ViewpointStatusCard>, message: string) => {
     if (!selectedNode) return;
@@ -4509,18 +4613,22 @@ export function App({
         responseMode: run.responseMode ?? "image",
         target: generationTargetForCustomGpt(run.targetChatUrl ?? ""),
         prompt: stageOnly && run.workflowStage
-          ? workflowStagePrompt(run.workflowStage, run.workflowAction ?? defaultWorkflowAction(run.workflowStage), {
-            projectName,
-            viewpointName: source.name,
-            projectContext: projectRequirements?.generationContext ?? "",
-            rulesetVersion: run.rulesetVersion,
-            sourceAspectRatio: `${source.sourceWidth}:${source.sourceHeight}`,
-            attachments: attachments.map((attachment, index) => ({
-              index: index + 1,
-              role: ATTACHMENT_ROLE_LABELS[attachment.role],
-              name: attachment.name
-            }))
-          })
+          ? promptForBatchItem(workflowStagePrompt(
+            run.workflowStage,
+            run.workflowAction ?? defaultWorkflowAction(run.workflowStage),
+            {
+              projectName,
+              viewpointName: source.name,
+              projectContext: projectRequirements?.generationContext ?? "",
+              rulesetVersion: run.rulesetVersion,
+              sourceAspectRatio: `${source.sourceWidth}:${source.sourceHeight}`,
+              attachments: attachments.map((attachment, index) => ({
+                index: index + 1,
+                role: ATTACHMENT_ROLE_LABELS[attachment.role],
+                name: attachment.name
+              }))
+            }
+          ), item)
           : wrapPromptForAction(run.workflowAction ?? "generate", preview.prompt),
         attachments
       });
@@ -5132,13 +5240,7 @@ export function App({
   }, [annotations, nodeIndex, textCards]);
 
   return (
-    <div
-      className="app-shell"
-      data-utility-panel-width={utilityPanelWidth}
-      style={({
-        "--utility-panel-width": utilityPanelWidth === "compact" ? "44rem" : utilityPanelWidth === "wide" ? "68rem" : "55rem"
-      } as CSSProperties)}
-    >
+    <div className="app-shell">
       <a className="skip-link" href="#canvas-main">跳到画布</a>
 
       <aside className="tool-rail" aria-label="画布工具">
@@ -5303,7 +5405,8 @@ export function App({
                 <Line points={[72, 92, 648, 92]} stroke="#dedede" strokeWidth={1} />
                 <Text x={72} y={126} text="DROP / IMPORT" fontFamily="Bahnschrift" fontSize={13} fill="#7a1820" letterSpacing={3} />
                 <Text x={72} y={172} text="导入第一张建筑图" fontFamily="Microsoft YaHei UI" fontSize={34} fill="#171717" />
-                <Text x={72} y={232} width={560} text="支持 PNG、JPEG、WebP，单张不超过 40 MiB。\n原图复制后只读保存，画布操作不会覆盖源文件。" fontFamily="Microsoft YaHei UI" fontSize={17} lineHeight={1.8} fill="#666666" />
+                <Text x={72} y={232} width={560} text={`支持 PNG、JPEG、WebP，单张不超过 40 MiB。
+原图复制后只读保存，画布操作不会覆盖源文件。`} fontFamily="Microsoft YaHei UI" fontSize={17} lineHeight={1.8} fill="#666666" />
               </Group>
             )}
             {renderedImageNodes.map((node) => (
@@ -5673,6 +5776,20 @@ export function App({
               </div>
             </div>
 
+            {executionMode === "manual" && contextMode === "batch" && bulkStage === "scene-optimization" && (
+              <PromptCardBatchPanel
+                pairs={promptCardBatchPairs}
+                busy={Boolean(
+                  generationActive
+                  || generationResultsPending
+                  || creatingTask
+                  || returningResults
+                  || (batchRun && batchRun.status !== "completed")
+                )}
+                onStart={sendPromptCardBatchToGpt}
+              />
+            )}
+
             <details className="context-generation-target">
               <summary>
                 <span>生成目标</span>
@@ -5831,7 +5948,11 @@ export function App({
                       || Boolean(batchRun && batchRun.status !== "completed")
                     }
                     onClick={sendSelectionToGpt}
-                  >{creatingTask ? "正在建立…" : `批量发送 ${selectedBatchNodes.length} 张`}</button>
+                  >{creatingTask
+                    ? "正在建立…"
+                    : workflowAction === "generate"
+                      ? `按统一要求发送 ${selectedBatchNodes.length} 张`
+                      : `批量发送 ${selectedBatchNodes.length} 张`}</button>
                 ) : (
                   <button
                     type="button"
@@ -6048,7 +6169,20 @@ export function App({
             </div>
 
             {executionMode === "manual" ? (
-              <p className="execution-mode-note">两个执行通道共用当前框选、独立阶段与严格串行队列；切换通道不会重复已完成项。</p>
+              <div className="manual-execution-tools">
+                <p className="execution-mode-note">两个执行通道共用当前框选、独立阶段与严格串行队列；切换通道不会重复已完成项。</p>
+                <PromptCardBatchPanel
+                  pairs={promptCardBatchPairs}
+                  busy={Boolean(
+                    generationActive
+                    || generationResultsPending
+                    || creatingTask
+                    || returningResults
+                    || (batchRun && batchRun.status !== "completed")
+                  )}
+                  onStart={sendPromptCardBatchToGpt}
+                />
+              </div>
             ) : (
               <div className="codex-folder-intake">
                 <div className="codex-capability-strip" data-ready={Boolean(codexCapabilities) || undefined}>
@@ -6770,8 +6904,6 @@ export function App({
           onPatchReview={patchCandidateReview}
           onApprove={approveCandidate}
           onReject={rejectCandidate}
-          panelWidth={utilityPanelWidth}
-          onPanelWidthChange={changeUtilityPanelWidth}
         />
         <section className="batch-section compact-section" data-status={batchRun?.status ?? "empty"}>
           <div className="task-heading">

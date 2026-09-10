@@ -10,7 +10,7 @@ test("可加载产物使用 P1 端口、共享协议副本和经典内容脚本"
   const manifest = JSON.parse(await readFile(resolve(root, "dist", "manifest.json"), "utf8")) as {
     version: string; host_permissions: string[]; content_scripts: Array<{ js: string[] }>;
   };
-  assert.equal(manifest.version, "1.5.21");
+  assert.equal(manifest.version, "1.5.22");
   assert.ok((manifest as { permissions?: string[] }).permissions?.includes("debugger"));
   assert.ok(manifest.host_permissions.includes("http://127.0.0.1:3220/*"));
   assert.ok(manifest.host_permissions.includes("http://127.0.0.1:3230/*"));
@@ -92,6 +92,8 @@ test("提交实现先锁定服务端 submitted，再点击网页按钮", async (
   assert.match(source, /generationFailureReason/);
   assert.match(source, /collectAssistantText/);
   assert.match(source, /textResponseReady/);
+  assert.match(source, /stalledTextResponseReady/);
+  assert.match(source, /完整文字已持续稳定/);
   assert.match(source, /缺少必需章节/);
   assert.match(source, /\/text-result/);
   assert.match(source, /responseMode/);
@@ -118,6 +120,7 @@ test("提交实现先锁定服务端 submitted，再点击网页按钮", async (
   assert.match(chatgptAdapter, /isCollectableGeneratedImage/);
   assert.match(chatgptAdapter, /collectAssistantText/);
   assert.match(chatgptAdapter, /isResponseComplete/);
+  assert.match(chatgptAdapter, /hasResponseCompletionSignal/);
   assert.match(chatgptAdapter, /copy-turn-action-button/);
   assert.match(chatgptAdapter, /attachmentRemove/);
   assert.match(chatgptAdapter, /ChatGPT 附件确认超时/);

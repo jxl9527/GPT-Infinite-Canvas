@@ -37,8 +37,6 @@ const STAGE_LABELS: Readonly<Record<ViewpointTaskSummary["stage"], string>> = {
   completed: "任务完成"
 };
 
-export type UtilityPanelWidth = "compact" | "standard" | "wide";
-
 interface ViewpointTaskCenterProps {
   tasks: ViewpointTaskSummary[];
   nodes: ImageNodeState[];
@@ -53,8 +51,6 @@ interface ViewpointTaskCenterProps {
   ): void;
   onApprove(viewpointId: ViewpointTaskSummary["viewpointId"], versionId: ViewpointCandidateSummary["versionId"]): void;
   onReject(viewpointId: ViewpointTaskSummary["viewpointId"], versionId: ViewpointCandidateSummary["versionId"]): void;
-  panelWidth: UtilityPanelWidth;
-  onPanelWidthChange(width: UtilityPanelWidth): void;
 }
 
 export function ViewpointTaskCenter({
@@ -66,9 +62,7 @@ export function ViewpointTaskCenter({
   onComparisonChange,
   onPatchReview,
   onApprove,
-  onReject,
-  panelWidth,
-  onPanelWidthChange
+  onReject
 }: ViewpointTaskCenterProps) {
   const [filter, setFilter] = useState<ViewpointTaskFilter>("all");
   const [query, setQuery] = useState("");
@@ -136,18 +130,6 @@ export function ViewpointTaskCenter({
             <div><dt>待验收</dt><dd>{tasks.filter((task) => task.state === "review").length}</dd></div>
             <div><dt>需处理</dt><dd>{tasks.filter((task) => task.state === "attention").length}</dd></div>
           </dl>
-          <div className="utility-panel-width" role="radiogroup" aria-label="调整任务面板宽度">
-            {(["compact", "standard", "wide"] as const).map((width) => (
-              <button
-                key={width}
-                type="button"
-                role="radio"
-                aria-checked={panelWidth === width}
-                title={`面板${width === "compact" ? "紧凑" : width === "wide" ? "加宽" : "标准"}`}
-                onClick={() => onPanelWidthChange(width)}
-              >{width === "compact" ? "窄" : width === "wide" ? "宽" : "中"}</button>
-            ))}
-          </div>
         </div>
       </header>
 

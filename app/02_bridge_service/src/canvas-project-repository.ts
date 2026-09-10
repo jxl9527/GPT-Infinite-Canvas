@@ -417,6 +417,16 @@ function validateProject(value: unknown): JsonObject {
           const idempotencyKey = boundedString(item.idempotencyKey, "workflow.batchRun.item.idempotencyKey", 500);
           if (!idempotencyKey) throw new ProtocolError("INVALID_INPUT", "批量任务项目幂等键无效");
         }
+        if (item.inputTextCardId !== undefined && item.inputTextCardId !== null) {
+          const inputTextCardId = boundedString(item.inputTextCardId, "workflow.batchRun.item.inputTextCardId", 120);
+          if (!inputTextCardId.startsWith("text_card_")) {
+            throw new ProtocolError("INVALID_INPUT", "批量任务绑定提示词卡无效");
+          }
+        }
+        if (item.inputPrompt !== undefined && item.inputPrompt !== null) {
+          const inputPrompt = boundedString(item.inputPrompt, "workflow.batchRun.item.inputPrompt", 20_000);
+          if (!inputPrompt) throw new ProtocolError("INVALID_INPUT", "批量任务绑定提示词无效");
+        }
         if (
           item.attemptCount !== undefined
           && (!Number.isInteger(item.attemptCount) || (item.attemptCount as number) < 0)

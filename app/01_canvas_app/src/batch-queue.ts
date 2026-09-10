@@ -1,5 +1,13 @@
 import type { ImageNodeState } from "./canvas-layout.js";
-import type { CanvasBatchItem, CanvasBatchRun } from "./project-state.js";
+import type {
+  CanvasBatchItem,
+  CanvasBatchRun,
+  ViewpointStatusCard
+} from "./project-state.js";
+import {
+  extractImageGenerationPrompt,
+  type CanvasTextCard
+} from "./text-card.js";
 import type {
   ImageRole,
   ResponseMode,
@@ -13,6 +21,14 @@ export interface BatchProgress {
   failed: number;
   remaining: number;
   percent: number;
+}
+
+export interface PromptCardBatchPair {
+  source: ImageNodeState;
+  promptCard: CanvasTextCard | null;
+  styleReferenceVersionId: `version_${string}` | null;
+  prompt: string;
+  issue: string;
 }
 
 export const WORKFLOW_ACTIONS = ["analyze", "prompt", "generate"] as const;
@@ -91,6 +107,87 @@ export function selectCodexCanvasSources(
         ? registered
         : importedFallback;
   return [...new Map(preferred.map((node) => [node.versionId, node])).values()];
+}
+
+export function resolvePromptCardBatchPairs(
+  sources: readonly ImageNodeState[],
+  viewpoints: readonly ViewpointStatusCard[],
+  textCards: readonly CanvasTextCard[]
+): PromptCardBatchPair[] {
+  const cardById = new Map(textCards.map((card) => [card.id, card]));
+  return sources.map((source) => {
+    const structuralVersionId = source.parentVersionId ?? source.versionId;
+    const viewpoint = viewpoints.find((candidate) => (
+      candidate.sourceVersionId === structuralVersionId
+      || candidate.sceneOptimization.structureBaseVersionId === structuralVersionId
+      || candidate.selectedVersionId === source.versionId
+    ));
+    const promptCardId = viewpoint?.sceneOptimization.promptCardId ?? null;
+    const promptCard = promptCardId ? cardById.get(promptCardId) ?? null : null;
+    if (!viewpoint) {
+      return { source, promptCard: null, styleReferenceVersionId: null, prompt: "", issue: "未登记对应视角" };
+    }
+    const styleReferenceVersionId = viewpoint.sceneOptimization.styleReferenceVersionId;
+    if (!promptCardId || !promptCard) {
+      return { source, promptCard: null, styleReferenceVersionId, prompt: "", issue: "缺少已返回提示词卡" };
+    }
+    if (promptCard.kind !== "prompt") {
+      return { source, promptCard, styleReferenceVersionId, prompt: "", issue: "绑定卡片不是提示词" };
+    }
+    if (promptCard.sourceVersionId !== structuralVersionId) {
+      return { source, promptCard, styleReferenceVersionId, prompt: "", issue: "提示词卡与原图不匹配" };
+    }
+    const prompt = extractImageGenerationPrompt(promptCard.text).trim();
+    return prompt
+      ? { source, promptCard, styleReferenceVersionId, prompt, issue: "" }
+      : { source, promptCard, styleReferenceVersionId, prompt: "", issue: "提示词卡缺少生成内容或禁止项" };
+  });
+}
+
+export function promptCardBatchReady(pairs: readonly PromptCardBatchPair[]): boolean {
+  return pairs.length > 0 && pairs.every((pair) => Boolean(pair.promptCard && pair.prompt && !pair.issue));
+}
+
+export function createPromptCardGenerationBatchRun(input: {
+  pairs: readonly PromptCardBatchPair[];
+  styleReference: ImageNodeState | null;
+  targetChatUrl: string;
+}, now = new Date().toISOString()): CanvasBatchRun {
+  if (!promptCardBatchReady(input.pairs)) {
+    throw new Error("所选原图中仍有未就绪或错配的提示词卡");
+  }
+  const run = createStageCanvasBatchRun({
+    sources: input.pairs.map((pair) => pair.source),
+    stage: "scene-optimization",
+    action: "generate",
+    prompt: "逐项使用与原图绑定且已确认的提示词卡生成图片",
+    structureBase: null,
+    styleReference: input.styleReference,
+    targetChatUrl: input.targetChatUrl,
+    runner: "manual"
+  }, now);
+  const pairBySourceVersionId = new Map(input.pairs.map((pair) => [pair.source.versionId, pair]));
+  return {
+    ...run,
+    items: run.items.map((item) => {
+      const pair = pairBySourceVersionId.get(item.sourceVersionId);
+      if (!pair?.promptCard || !pair.prompt) {
+        throw new Error(`${item.sourceName} 缺少可冻结的提示词卡`);
+      }
+      return {
+        ...item,
+        inputTextCardId: pair.promptCard.id,
+        inputPrompt: pair.prompt
+      };
+    })
+  };
+}
+
+export function promptForBatchItem(stagePrompt: string, item: CanvasBatchItem): string {
+  const prompt = item.inputPrompt?.trim() ?? "";
+  return prompt
+    ? `${stagePrompt.trim()}\n\n【本视角已确认提示词】\n${prompt}`
+    : stagePrompt.trim();
 }
 
 export function createCanvasBatchRun(

@@ -93,6 +93,7 @@ test("文字任务等待回复完成且必需章节齐全后才允许回收", as
   vm.createContext(context); vm.runInContext(source, context);
   const api = context.GPTCanvasContent as {
     textResponseReady(prompt: string, response: string, generating: boolean, completionSignal: boolean): boolean;
+    stalledTextResponseReady(prompt: string, response: string, generating: boolean, completionSignal: boolean, stableForMs: number): boolean;
   };
   const prompt = "请输出【D5调整建议】【最终生成提示词】【必须保持与禁止改变】";
   const historicalPartial = "ChatGPT 说：【D5调整建议】\n\n光影改为参考图的";
@@ -103,4 +104,8 @@ test("文字任务等待回复完成且必需章节齐全后才允许回收", as
   assert.equal(api.textResponseReady(prompt, complete, false, false), false);
   assert.equal(api.textResponseReady(prompt, complete, false, true), true);
   assert.equal(api.textResponseReady(prompt, markdownHeadings, false, true), true);
+  assert.equal(api.stalledTextResponseReady(prompt, complete, true, true, 29_999), false);
+  assert.equal(api.stalledTextResponseReady(prompt, historicalPartial, true, true, 30_000), false);
+  assert.equal(api.stalledTextResponseReady(prompt, complete, true, false, 30_000), false);
+  assert.equal(api.stalledTextResponseReady(prompt, complete, true, true, 30_000), true);
 });

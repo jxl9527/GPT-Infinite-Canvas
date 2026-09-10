@@ -10,21 +10,21 @@ import {
 } from "../src/canvas-automation.js";
 
 test("读取真实扩展版本并拦截未重载的旧版本", () => {
-  assert.equal(automationExtensionVersion("1.5.21", "任意消息"), "1.5.21");
+  assert.equal(automationExtensionVersion("1.5.22", "任意消息"), "1.5.22");
   assert.equal(automationExtensionVersion(null, "全自动桥接扩展 1.5.4 已连接"), "1.5.4");
   assert.equal(automationExtensionVersionSupported("1.5.16"), false);
   assert.equal(automationExtensionVersionSupported("1.5.17"), false);
   assert.equal(automationExtensionVersionSupported("1.5.18"), false);
   assert.equal(automationExtensionVersionSupported("1.5.19"), false);
-  assert.equal(automationExtensionVersionSupported("1.5.20"), false);
-  assert.equal(automationExtensionVersionSupported("1.5.21"), true);
+  assert.equal(automationExtensionVersionSupported("1.5.21"), false);
+  assert.equal(automationExtensionVersionSupported("1.5.22"), true);
   assert.equal(automationExtensionVersionSupported("1.6.0"), true);
   assert.equal(automationExtensionReady("ready", "1.5.16"), false);
   assert.equal(automationExtensionReady("started", "1.5.17"), false);
   assert.equal(automationExtensionReady("started", "1.5.18"), false);
   assert.equal(automationExtensionReady("started", "1.5.19"), false);
-  assert.equal(automationExtensionReady("started", "1.5.20"), false);
-  assert.equal(automationExtensionReady("started", "1.5.21"), true);
+  assert.equal(automationExtensionReady("started", "1.5.21"), false);
+  assert.equal(automationExtensionReady("started", "1.5.22"), true);
 });
 
 test("任务完成后自动回收尚未返回的结果", () => {

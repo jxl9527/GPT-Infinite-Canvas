@@ -31,6 +31,7 @@ test("优化阶段提示词与目标图动作明确分离", () => {
   const generate = workflowStagePrompt("scene-optimization", "generate");
   assert.match(promptOnly, /只返回文字，不生成图片/);
   assert.match(promptOnly, /【最终生成提示词】/);
+  assert.match(promptOnly, /不得追加提问、征询、总结、评价、邀约或下一步建议/);
   assert.match(generate, /仅用于D5深化参考/);
   assert.match(generate, /不是结构依据或最终交付图/);
 });

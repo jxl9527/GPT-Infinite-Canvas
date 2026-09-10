@@ -60,7 +60,7 @@ function overlaps(
     && left.y + left.height > right.y;
 }
 
-test("自动排版按文字卡、父图和生成层级分列，保持尺寸且所有对象互不遮挡", () => {
+test("自动排版按文字卡在左、来源图居中、生成图在右分列，且所有对象互不遮挡", () => {
   const rootA = image("root_a", "root_a", 360, 180);
   const childA1 = image("child_a1", "child_a1", 380, 200, 640, 360, rootA.versionId);
   const childA2 = image("child_a2", "child_a2", 400, 220, 480, 320, rootA.versionId);

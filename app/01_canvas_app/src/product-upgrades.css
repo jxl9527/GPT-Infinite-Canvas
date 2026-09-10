@@ -29,9 +29,20 @@
 .task-start-launcher > footer { padding: .75rem .2rem .1rem; color: #81786f; font-size: .52rem; }
 .task-start-launcher :is(button):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
+.generation-drawer-body[data-active-panel="viewpoints"],
+.generation-drawer-body[data-active-panel="batch"],
+.generation-drawer-body[data-active-panel="prompts"],
+.generation-drawer-body[data-active-panel="preview"],
+.generation-drawer-body[data-active-panel="delivery"] {
+  width: min(var(--utility-drawer-width), calc(100vw - 6.6rem));
+}
+
 .generation-drawer-body[data-active-panel="viewpoints"] {
-  width: min(var(--utility-panel-width, 55rem), calc(100vw - 7rem));
   display: block;
+}
+
+.inspector[data-active-panel="execution"] > .workflow-section {
+  width: min(var(--utility-drawer-width), calc(100vw - 6.6rem));
 }
 
 .inspector .generation-drawer-body[data-active-panel="viewpoints"] > .viewpoint-task-center {
@@ -74,11 +85,6 @@
 .viewpoint-task-heading-actions > dl div { display: grid; gap: .2rem; min-width: 3rem; }
 .viewpoint-task-center-heading dt { color: #817a70; font-size: .52rem; }
 .viewpoint-task-center-heading dd { margin: 0; color: #332f2a; font: 700 .7rem/1 Bahnschrift, sans-serif; }
-.utility-panel-width { display: flex; border: 1px solid #c8c0b7; }
-.utility-panel-width button { width: 1.9rem; min-height: 1.75rem; border: 0; color: #6e665d; background: #eee9e1; cursor: pointer; font-size: .5rem; }
-.utility-panel-width button + button { border-left: 1px solid #c8c0b7; }
-.utility-panel-width button[aria-checked="true"] { color: #fff; background: #3a3530; }
-
 .viewpoint-task-toolbar {
   display: grid;
   grid-template-columns: minmax(10rem, 1fr) auto;
@@ -224,17 +230,25 @@
 .viewpoint-task-center :is(button, input, textarea, summary):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 @media (min-width: 64.01rem) {
-  .app-shell:has(.inspector[data-active-panel="viewpoints"]) .canvas-region {
-    margin-inline-end: min(var(--utility-panel-width, 55rem), calc(100vw - 7rem));
-  }
+  .app-shell:has(.inspector[data-active-panel="viewpoints"]) .canvas-region,
+  .app-shell:has(.inspector[data-active-panel="execution"]) .canvas-region,
+  .app-shell:has(.inspector[data-active-panel="batch"]) .canvas-region,
+  .app-shell:has(.inspector[data-active-panel="prompts"]) .canvas-region,
   .app-shell:has(.inspector[data-active-panel="preview"]) .canvas-region,
   .app-shell:has(.inspector[data-active-panel="delivery"]) .canvas-region {
-    margin-inline-end: min(31rem, calc(100vw - 7rem));
+    margin-inline-end: min(var(--utility-drawer-width), calc(100vw - 7rem));
   }
 }
 
 @media (max-width: 64rem) {
-  .generation-drawer-body[data-active-panel="viewpoints"] { width: min(40rem, calc(100vw - 5.6rem)); }
+  .generation-drawer-body[data-active-panel="viewpoints"],
+  .generation-drawer-body[data-active-panel="batch"],
+  .generation-drawer-body[data-active-panel="prompts"],
+  .generation-drawer-body[data-active-panel="preview"],
+  .generation-drawer-body[data-active-panel="delivery"],
+  .inspector[data-active-panel="execution"] > .workflow-section {
+    width: min(var(--utility-drawer-width), calc(100vw - 5.6rem));
+  }
   .viewpoint-task-layout { grid-template-columns: 12rem minmax(0, 1fr); }
   .candidate-picker { grid-template-columns: 1fr; }
 }
@@ -243,7 +257,12 @@
   .task-start-launcher { width: calc(100% - 1.4rem); max-height: calc(100% - 1.4rem); overflow: auto; }
   .task-start-launcher > div { grid-template-columns: 1fr; }
   .task-start-launcher > div > button { min-height: 9rem; }
-  .generation-drawer-body[data-active-panel="viewpoints"] { width: calc(100vw - 5.6rem); }
+  .generation-drawer-body[data-active-panel="viewpoints"],
+  .generation-drawer-body[data-active-panel="batch"],
+  .generation-drawer-body[data-active-panel="prompts"],
+  .generation-drawer-body[data-active-panel="preview"],
+  .generation-drawer-body[data-active-panel="delivery"],
+  .inspector[data-active-panel="execution"] > .workflow-section { width: calc(100vw - 5.6rem); }
   .viewpoint-task-toolbar { grid-template-columns: 1fr; }
   .viewpoint-task-toolbar > div { overflow-x: auto; }
   .viewpoint-task-layout { grid-template-columns: 1fr; overflow: auto; }

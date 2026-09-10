@@ -6,13 +6,19 @@ import {
   browserAutomationOwnsBatch,
   codexStageAutomationPlan,
   createCanvasBatchRun,
+  createPromptCardGenerationBatchRun,
   createStageCanvasBatchRun,
   defaultWorkflowAction,
   nextQueuedBatchItem,
+  promptCardBatchReady,
+  promptForBatchItem,
+  resolvePromptCardBatchPairs,
   selectCodexCanvasSources,
   updateBatchItem,
   workflowActionAllowed
 } from "../src/batch-queue.js";
+import { createViewpointStatusCard } from "../src/project-state.js";
+import type { CanvasTextCard } from "../src/text-card.js";
 import { workflowStagePrompt } from "../src/fixed-workflow-prompts.js";
 
 function node(name: string): ImageNodeState {
@@ -33,6 +39,23 @@ function node(name: string): ImageNodeState {
     width: 640,
     height: 360,
     outputRatio: "free"
+  };
+}
+
+function promptCard(name: string, sourceVersionId: `version_${string}`, finalPrompt: string): CanvasTextCard {
+  return {
+    id: `text_card_${name}`,
+    kind: "prompt",
+    title: `${name}｜生成提示词`,
+    text: `【D5调整建议】这部分只供设计师复核。\n【最终生成提示词】${finalPrompt}\n【必须保持与禁止改变】保持建筑结构与相机不变。`,
+    x: 0,
+    y: 0,
+    width: 460,
+    height: 360,
+    sourceVersionId,
+    taskId: `task_${name}`,
+    createdAt: "2026-08-13T00:00:00.000Z",
+    updatedAt: "2026-08-13T00:00:00.000Z"
   };
 }
 
@@ -106,6 +129,43 @@ test("A模式优化阶段可直接进入且提示词与生图保持两个独立�
   });
   assert.equal(imageRun.responseMode, "image");
   assert.equal(imageRun.items[0]?.outputKind, "d5-scene-target");
+});
+
+test("A模式可将每张原图与其已返回提示词卡一一配对并冻结独立输入", () => {
+  const baseA = node("1人视");
+  const baseB = node("2鸟瞰");
+  const cardA = promptCard("人视", baseA.versionId, "把人视画面优化为清透明亮日景。");
+  const cardB = promptCard("鸟瞰", baseB.versionId, "把鸟瞰画面优化为克制的清晨氛围。");
+  const viewpointA = createViewpointStatusCard({ name: "1人视", stage: "scene-optimization", sourceVersionId: baseA.versionId });
+  const viewpointB = createViewpointStatusCard({ name: "2鸟瞰", stage: "scene-optimization", sourceVersionId: baseB.versionId });
+  viewpointA.sceneOptimization = { ...viewpointA.sceneOptimization, promptCardId: cardA.id, status: "prompt-ready" };
+  viewpointB.sceneOptimization = { ...viewpointB.sceneOptimization, promptCardId: cardB.id, status: "prompt-ready" };
+
+  const pairs = resolvePromptCardBatchPairs([baseA, baseB], [viewpointA, viewpointB], [cardA, cardB]);
+  assert.equal(promptCardBatchReady(pairs), true);
+  assert.deepEqual(pairs.map((pair) => pair.promptCard?.id), [cardA.id, cardB.id]);
+  assert.doesNotMatch(pairs[0]?.prompt ?? "", /D5调整建议|设计师复核/);
+
+  const run = createPromptCardGenerationBatchRun({ pairs, styleReference: null, targetChatUrl: "" }, "2026-08-13T00:00:00.000Z");
+  assert.deepEqual(run.items.map((item) => item.inputTextCardId), [cardA.id, cardB.id]);
+  assert.match(run.items[0]?.inputPrompt ?? "", /清透明亮日景/);
+  assert.doesNotMatch(run.items[0]?.inputPrompt ?? "", /清晨氛围/);
+  assert.match(run.items[1]?.inputPrompt ?? "", /清晨氛围/);
+  assert.doesNotMatch(run.items[1]?.inputPrompt ?? "", /清透明亮日景/);
+  assert.match(promptForBatchItem("基础结构保护", run.items[0]!), /本视角已确认提示词[\s\S]*清透明亮日景/);
+});
+
+test("A模式一一对应批次在任一提示词卡缺失或错配时拒绝启动", () => {
+  const baseA = node("1人视");
+  const baseB = node("2鸟瞰");
+  const cardA = promptCard("人视", baseA.versionId, "优化日景。");
+  const viewpointA = createViewpointStatusCard({ name: "1人视", stage: "scene-optimization", sourceVersionId: baseA.versionId });
+  const viewpointB = createViewpointStatusCard({ name: "2鸟瞰", stage: "scene-optimization", sourceVersionId: baseB.versionId });
+  viewpointA.sceneOptimization = { ...viewpointA.sceneOptimization, promptCardId: cardA.id, status: "prompt-ready" };
+  const pairs = resolvePromptCardBatchPairs([baseA, baseB], [viewpointA, viewpointB], [cardA]);
+  assert.equal(promptCardBatchReady(pairs), false);
+  assert.equal(pairs[1]?.issue, "缺少已返回提示词卡");
+  assert.throws(() => createPromptCardGenerationBatchRun({ pairs, styleReference: null, targetChatUrl: "" }), /未就绪或错配/);
 });
 
 test("B模式优化阶段固定连续执行提示词与目标图", () => {

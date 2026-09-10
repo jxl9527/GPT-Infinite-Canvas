@@ -1,6 +1,6 @@
 import { nextChildBoundsToRight } from "./canvas-layout.js";
 
-export const MINIMUM_AUTOMATION_EXTENSION_VERSION = "1.5.21";
+export const MINIMUM_AUTOMATION_EXTENSION_VERSION = "1.5.22";
 
 export function automationExtensionVersion(explicitVersion: string | null, message: string | null): string | null {
   const candidate = explicitVersion?.trim() || message?.match(/\b(\d+\.\d+\.\d+)\b/)?.[1] || "";

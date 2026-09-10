@@ -58,10 +58,13 @@ namespace GPTCanvasContent {
     sendButton(): HTMLButtonElement | null { return this.root.querySelector<HTMLButtonElement>(SELECTORS.send); }
     isSendReady(): boolean { const button = this.sendButton(); return Boolean(button && !button.disabled); }
     isGenerating(): boolean { return Boolean(this.root.querySelector(SELECTORS.stop)); }
-    isResponseComplete(): boolean {
+    hasResponseCompletionSignal(): boolean {
       const turns = this.assistantTurns();
       const latestTurn = turns[turns.length - 1];
-      return Boolean(latestTurn && !this.isGenerating() && latestTurn.querySelector(SELECTORS.assistantComplete));
+      return Boolean(latestTurn?.querySelector(SELECTORS.assistantComplete));
+    }
+    isResponseComplete(): boolean {
+      return !this.isGenerating() && this.hasResponseCompletionSignal();
     }
 
     async waitForComposer(timeoutMs = 120_000): Promise<HTMLElement> {

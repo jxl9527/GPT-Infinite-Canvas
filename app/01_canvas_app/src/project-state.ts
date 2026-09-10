@@ -134,6 +134,8 @@ export interface CanvasBatchItem {
   attachmentRoles?: ImageRole[];
   outputKind?: "preflight-review" | "d5-scene-target" | "glass-deepened-full-frame";
   resultTextCardId?: `text_card_${string}` | null;
+  inputTextCardId?: `text_card_${string}` | null;
+  inputPrompt?: string | null;
   status: BatchItemStatus;
   taskId: `task_${string}` | null;
   resultVersionIds: `version_${string}`[];
