@@ -67,6 +67,11 @@ export interface PromptLibraryItem {
   content: string;
   createdAt: string;
   updatedAt: string;
+  category?: string;
+  inputHint?: string;
+  coverDataUrl?: string;
+  coverLabel?: string;
+  version?: number;
 }
 
 export interface ProjectRuntimeContext {
@@ -131,6 +136,7 @@ export class ProjectRuntimeManager {
   private readonly systemDiagnostics: DiagnosticLogger;
   private readonly promptLibraryPath: string;
   private prompts: PromptLibraryItem[] = [];
+  private promptQueue: Promise<void> = Promise.resolve();
   private active: ProjectRuntimeContext | null = null;
 
   constructor(readonly runtimeRoot: string, readonly legacyProjectRoot: string) {
@@ -169,11 +175,29 @@ export class ProjectRuntimeManager {
     return [...this.prompts].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
 
-  async savePrompt(idValue: unknown, titleValue: unknown, contentValue: unknown): Promise<PromptLibraryItem> {
+  async savePrompt(idValue: unknown, titleValue: unknown, contentValue: unknown, metadata?: Record<string, unknown>): Promise<PromptLibraryItem> {
+    const operation = this.promptQueue.then(() => this.savePromptInternal(idValue, titleValue, contentValue, metadata));
+    this.promptQueue = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
+  private async savePromptInternal(idValue: unknown, titleValue: unknown, contentValue: unknown, metadata?: Record<string, unknown>): Promise<PromptLibraryItem> {
     const title = typeof titleValue === "string" ? titleValue.trim().replace(/\s+/g, " ") : "";
     const content = typeof contentValue === "string" ? contentValue.trim() : "";
     if (!title || title.length > 40) throw new ProtocolError("INVALID_INPUT", "提示词名称须为 1–40 个字符");
-    if (!content || content.length > 2_000) throw new ProtocolError("INVALID_INPUT", "提示词内容须为 1–2000 个字符");
+    if (!content || content.length > 20_000) throw new ProtocolError("INVALID_INPUT", "提示词内容须为 1–20000 个字符");
+    const extras: Partial<PromptLibraryItem> = {};
+    for (const key of ["category", "inputHint", "coverLabel"] as const) {
+      const value = metadata?.[key];
+      if (value !== undefined) {
+        if (typeof value !== "string" || value.length > 200) throw new ProtocolError("INVALID_INPUT", `${key} 无效`);
+        extras[key] = value;
+      }
+    }
+    if (metadata?.coverDataUrl !== undefined) {
+      if (typeof metadata.coverDataUrl !== "string" || metadata.coverDataUrl.length > 2_800_000 || !/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(metadata.coverDataUrl)) throw new ProtocolError("INVALID_INPUT", "封面须为不超过 2 MiB 的 PNG、JPEG 或 WebP");
+      extras.coverDataUrl = metadata.coverDataUrl;
+    }
     const existing = typeof idValue === "string"
       ? this.prompts.find((item) => item.id === idValue)
       : undefined;
@@ -187,20 +211,29 @@ export class ProjectRuntimeManager {
         createdAt: now,
         updatedAt: now
       };
+    Object.assign(item, extras, { version: (existing?.version ?? 0) + 1 });
+    const previous = this.prompts;
     this.prompts = existing
       ? this.prompts.map((candidate) => candidate.id === item.id ? item : candidate)
       : [...this.prompts, item];
-    await this.writePromptLibrary();
+    try { await this.writePromptLibrary(); } catch (error) { this.prompts = previous; throw error; }
     return item;
   }
 
   async deletePrompt(idValue: string): Promise<void> {
+    const operation = this.promptQueue.then(() => this.deletePromptInternal(idValue));
+    this.promptQueue = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
+  private async deletePromptInternal(idValue: string): Promise<void> {
     const id = decodeURIComponent(idValue);
     if (!/^prompt_[a-f0-9-]{36}$/.test(id)) throw new ProtocolError("INVALID_INPUT", "提示词编号无效");
     const next = this.prompts.filter((item) => item.id !== id);
     if (next.length === this.prompts.length) throw new ProtocolError("TASK_NOT_FOUND", "提示词不存在");
+    const previous = this.prompts;
     this.prompts = next;
-    await this.writePromptLibrary();
+    try { await this.writePromptLibrary(); } catch (error) { this.prompts = previous; throw error; }
   }
 
   async list(): Promise<WorkbenchProject[]> {
@@ -544,6 +577,13 @@ export class ProjectRuntimeManager {
   }
 
   private async writePromptLibrary(): Promise<void> {
+    try {
+      const previous = await readFile(this.promptLibraryPath, "utf8");
+      JSON.parse(previous);
+      const backups = resolve(this.runtimeRoot, "workbench", "prompt-library-history");
+      await mkdir(backups, { recursive: true });
+      await writeFile(resolve(backups, `${Date.now()}-${randomUUID()}.json`), previous, { encoding: "utf8", flag: "wx" });
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     const temporary = resolve(this.runtimeRoot, "workbench", `prompt-library.${randomUUID()}.tmp`);
     await writeFile(
       temporary,

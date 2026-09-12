@@ -31,7 +31,7 @@ await mkdir(resolve(discoveryPath, ".."), { recursive: true });
 const discoveryTemporary = `${discoveryPath}.${process.pid}.tmp`;
 await writeFile(discoveryTemporary, `${JSON.stringify({
   schemaVersion: "1.0",
-  releaseVersion: "0.5.3",
+  releaseVersion: "0.6.0",
   bridgeUrl: `http://${host}:${port}`,
   canvasUrl: `http://${host}:${canvasPort}`,
   runtimeRoot,
@@ -60,7 +60,7 @@ const server = createBridgeServer({
 });
 server.listen(port, host, async () => {
   await writeFile(resolve(runtimeRoot, "service.pid"), `${process.pid}\n`, "utf8");
-  process.stdout.write(`GPT Canvas Bridge 0.5.3 listening at http://${host}:${port}\n`);
+  process.stdout.write(`GPT Canvas Bridge 0.6.0 listening at http://${host}:${port}\n`);
 });
 
 try {

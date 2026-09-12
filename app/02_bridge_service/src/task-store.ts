@@ -74,8 +74,17 @@ export class TaskStore {
 
   async create(input: CreateTaskInput, attachments: TaskAttachment[]): Promise<GenerationTask> {
     return this.exclusive(async () => {
-      const active = this.activeInternal();
-      if (active) throw new ProtocolError("TASK_LOCKED", `当前任务 ${active.id} 尚未结束`);
+      if (input.simpleRender) {
+        const previous = [...this.tasks.values()].find((task) => task.simpleRender?.batchId === input.simpleRender!.batchId && task.simpleRender.itemId === input.simpleRender!.itemId);
+        if (previous) {
+          if (previous.prompt !== input.prompt || JSON.stringify(previous.simpleRender) !== JSON.stringify(input.simpleRender)
+            || JSON.stringify(previous.attachments.map((a) => [a.relativePath, a.sha256])) !== JSON.stringify(attachments.map((a) => [a.relativePath, a.sha256]))) {
+            throw new ProtocolError("INVALID_INPUT", "同一任务的底图或提示词已改变，不能重复提交");
+          }
+          return clone(previous);
+        }
+      }
+      this.assertCapacity(input);
       if (attachments.length !== input.attachments.length) {
         throw new ProtocolError("INVALID_ATTACHMENT", "附件解析结果与任务输入不一致");
       }
@@ -95,6 +104,7 @@ export class TaskStore {
         events: [queued],
         results: []
       };
+      if (input.simpleRender) task.simpleRender = clone(input.simpleRender);
       this.tasks.set(task.id, task);
       await this.persist(task, queued);
       return clone(task);
@@ -104,8 +114,7 @@ export class TaskStore {
   async claim(id: string, by: EventActor = "extension"): Promise<GenerationTask> {
     return this.exclusive(async () => {
       const task = this.requiredInternal(id);
-      const active = this.activeInternal();
-      if (active && active.id !== id) throw new ProtocolError("TASK_LOCKED", `已有活动任务 ${active.id}`);
+      this.assertCapacity(task, id);
       if (task.status === "queued") return clone(await this.transitionInternal(task, "opening-chat", by, "扩展已领取任务"));
       if (!isTerminalStatus(task.status)) return clone(task);
       throw new ProtocolError("INVALID_TRANSITION", `终态任务 ${id} 不可领取`);
@@ -175,6 +184,19 @@ export class TaskStore {
     return [...this.tasks.values()].find((candidate) => !isTerminalStatus(candidate.status));
   }
 
+  private assertCapacity(input: Pick<CreateTaskInput, "simpleRender">, excludeId?: string): void {
+    const active = [...this.tasks.values()].filter((task) => task.id !== excludeId && !isTerminalStatus(task.status));
+    if (!active.length) return;
+    const identity = input.simpleRender;
+    if (!identity || active.some((task) => !task.simpleRender || task.simpleRender.batchId !== identity.batchId
+      || task.simpleRender.concurrency !== identity.concurrency) || active.length >= identity.concurrency) {
+      throw new ProtocolError("TASK_LOCKED", "当前生成位置已占用，请等待已有任务完成");
+    }
+    if (!excludeId && active.some((task) => !task.submittedAt || task.status === "needs-user")) {
+      throw new ProtocolError("TASK_LOCKED", "等待上一张提交完成或处理异常后再启动下一张");
+    }
+  }
+
   private requiredInternal(id: string): GenerationTask {
     const task = this.tasks.get(id);
     if (!task) throw new ProtocolError("TASK_NOT_FOUND", `任务不存在：${id}`);
@@ -195,10 +217,7 @@ export class TaskStore {
     if (!canTransition(task.status, next)) {
       throw new ProtocolError("INVALID_TRANSITION", `不允许从 ${task.status} 变更为 ${next}`);
     }
-    const active = this.activeInternal();
-    if (!isTerminalStatus(next) && active && active.id !== task.id) {
-      throw new ProtocolError("TASK_LOCKED", `已有活动任务 ${active.id}`);
-    }
+    if (!isTerminalStatus(next)) this.assertCapacity(task, task.id);
     const at = new Date().toISOString(); const nextEvent = event(next, by, at, note);
     task.status = next; task.updatedAt = at; task.events.push(nextEvent);
     if (next === "submitted") task.submittedAt = at;

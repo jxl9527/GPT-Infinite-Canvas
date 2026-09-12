@@ -1,6 +1,6 @@
 {
   "name": "d5-ai-canvas",
-  "version": "0.5.3",
+  "version": "0.6.0",
   "description": "Safely runs the D5 AI Canvas three-stage architectural image workflow through the local bridge.",
   "author": {
     "name": "D5 AI Canvas"

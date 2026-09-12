@@ -122,6 +122,10 @@ try {
     join(workspaceRoot, "docs", "guides", "安装与使用.md"),
     join(bundleRoot, "README.md")
   );
+  for (const name of ["简化版验收说明.md", "提示词内容包说明.md", "无限画布简化改版项目计划书.md"]) {
+    await copy(join(workspaceRoot, "docs", name), join(bundleRoot, "docs", name));
+  }
+  await copy(join(appRoot, "scripts", "create-prompt-pack.mjs"), join(bundleRoot, "scripts", "create-prompt-pack.mjs"));
   const runtimeDependencyCheck = spawnSync(
     process.execPath,
     ["--input-type=module", "--eval", 'await import("@gpt-canvas/shared")'],

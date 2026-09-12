@@ -10,7 +10,7 @@ test("可加载产物使用 P1 端口、共享协议副本和经典内容脚本"
   const manifest = JSON.parse(await readFile(resolve(root, "dist", "manifest.json"), "utf8")) as {
     version: string; host_permissions: string[]; content_scripts: Array<{ js: string[] }>;
   };
-  assert.equal(manifest.version, "1.5.22");
+  assert.equal(manifest.version, "1.6.0");
   assert.ok((manifest as { permissions?: string[] }).permissions?.includes("debugger"));
   assert.ok(manifest.host_permissions.includes("http://127.0.0.1:3220/*"));
   assert.ok(manifest.host_permissions.includes("http://127.0.0.1:3230/*"));

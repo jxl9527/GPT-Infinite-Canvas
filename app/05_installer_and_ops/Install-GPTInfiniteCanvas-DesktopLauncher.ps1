@@ -35,7 +35,7 @@ $shortcut.TargetPath = Join-Path $env:SystemRoot 'System32\wscript.exe'
 $shortcut.Arguments = "//nologo `"$launcherPath`""
 $shortcut.WorkingDirectory = $scriptRoot
 $shortcut.IconLocation = "$iconPath,0"
-$shortcut.Description = 'GPT Infinite Canvas 0.5.3｜浏览器人工批量／Codex 自动运行'
+$shortcut.Description = 'GPT Infinite Canvas 0.6.0｜浏览器人工批量／Codex 自动运行'
 $shortcut.Save()
 
 if (-not (Test-Path -LiteralPath $shortcutPath -PathType Leaf)) {
@@ -54,6 +54,6 @@ if (-not $SkipCodexPlugin) {
   }
 }
 
-$logLine = '{0} version="0.5.3" installed="{1}" launcher="{2}"' -f (Get-Date -Format o), $shortcutPath, $launcherPath
+$logLine = '{0} version="0.6.0" installed="{1}" launcher="{2}"' -f (Get-Date -Format o), $shortcutPath, $launcherPath
 Add-Content -LiteralPath $logPath -Value $logLine -Encoding utf8
 Write-Output $shortcutPath

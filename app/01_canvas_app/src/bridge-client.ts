@@ -19,6 +19,12 @@ interface ApiErrorBody {
   };
 }
 
+export async function assertSimpleBridgeReady(): Promise<void> {
+  const response = await fetch(`${BRIDGE_BASE_URL}/health`);
+  const health = await response.json() as { simpleRenderConcurrency?: number };
+  if (!response.ok || health.simpleRenderConcurrency !== 2) throw new Error("本地服务尚未更新。请先在旧版处理未结束任务，再启动 0.6.0 新版。");
+}
+
 export class BridgeApiError extends Error {
   readonly code: string;
   readonly status: number;
@@ -84,6 +90,11 @@ export interface PromptLibraryItem {
   content: string;
   createdAt: string;
   updatedAt: string;
+  category?: string;
+  inputHint?: string;
+  coverDataUrl?: string;
+  coverLabel?: string;
+  version?: number;
 }
 
 export interface DeliveryTarget {
@@ -119,6 +130,8 @@ export interface CodexCanvasCapabilities {
 }
 
 let sessionToken: string | null = null;
+let expectedProjectId: string | null = null;
+export function bindCanvasProject(id: string | null): void { expectedProjectId = id; }
 
 async function apiError(response: Response): Promise<Error> {
   const body = await response.json().catch(() => ({})) as ApiErrorBody;
@@ -152,6 +165,7 @@ async function authenticatedFetch(path: string, init: RequestInit = {}): Promise
     headers: {
       ...init.headers,
       "x-bridge-token": sessionToken ?? ""
+      ,...(expectedProjectId ? { "x-canvas-project": expectedProjectId } : {})
     },
     cache: "no-store"
   });
@@ -294,6 +308,28 @@ export async function listPromptLibrary(): Promise<PromptLibraryItem[]> {
   if (!response.ok) throw await apiError(response);
   const body = await response.json() as { prompts?: PromptLibraryItem[] };
   return Array.isArray(body.prompts) ? body.prompts : [];
+}
+
+export async function savePromptCard(card: Pick<PromptLibraryItem, "title" | "content"> & Partial<PromptLibraryItem>): Promise<PromptLibraryItem> {
+  const response = await authenticatedFetch("/api/v1/workbench/prompts", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(card)
+  });
+  if (!response.ok) throw await apiError(response);
+  return (await response.json() as { prompt: PromptLibraryItem }).prompt;
+}
+
+export async function listGenerationTasks(): Promise<GenerationTask[]> {
+  const response = await authenticatedFetch("/api/v1/tasks");
+  if (!response.ok) throw await apiError(response);
+  return (await response.json() as { tasks: GenerationTask[] }).tasks;
+}
+
+export async function exportSelectedImages(directory: string, selections: Array<{ versionId: string; assetId: string; name: string }>): Promise<{ exported: number; failed: number; records: Array<{ versionId: string; path?: string; error?: string }> }> {
+  const response = await authenticatedFetch("/api/v1/canvas/export-images", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ directory, selections })
+  });
+  if (!response.ok) throw await apiError(response);
+  return response.json();
 }
 
 export async function savePromptLibraryItem(
@@ -648,12 +684,13 @@ export async function readCanvasProject(): Promise<CanvasProjectDocument | null>
 
 export async function saveCanvasProject(
   project: CanvasProjectDocument,
-  forceSnapshot = false
+  forceSnapshot = false,
+  expectedRevision?: number
 ): Promise<{ project: CanvasProjectDocument; snapshotRelativePath: string | null }> {
   const response = await authenticatedFetch("/api/v1/canvas/project", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ project, forceSnapshot })
+    body: JSON.stringify({ project, forceSnapshot, expectedRevision })
   });
   if (!response.ok) throw await apiError(response);
   return response.json() as Promise<{

@@ -30,6 +30,40 @@ const DEFAULTS: Settings = {
   chatBindingId: ""
 };
 
+interface TaskBinding { taskId: string; tabId: number; bindingId: string; canvasTabId?: number | undefined }
+const bindingKey = (id: string) => `canvas-binding:${id}`;
+const openingTasks = new Map<string, Promise<{ task: GenerationTask; tabId: number; bindingId: string; reused: boolean }>>();
+
+async function taskBinding(id: string): Promise<TaskBinding | null> {
+  const key = bindingKey(id);
+  const value = (await chrome.storage.local.get(key))[key] as TaskBinding | undefined;
+  if (value?.taskId === id && typeof value.tabId === "number") return value;
+  const old = await settings();
+  if (old.chatTaskId === id && typeof old.chatTabId === "number" && old.chatBindingId) {
+    const migrated = { taskId: id, tabId: old.chatTabId, bindingId: old.chatBindingId, canvasTabId: old.canvasTabId };
+    await chrome.storage.local.set({ [key]: migrated });
+    return migrated;
+  }
+  return null;
+}
+
+async function bindingForTab(tabId: number | undefined): Promise<TaskBinding | null> {
+  if (tabId === undefined) return null;
+  const values = await chrome.storage.local.get(null) as Record<string, unknown>;
+  for (const [key, value] of Object.entries(values)) {
+    if (key.startsWith("canvas-binding:") && value && typeof value === "object" && (value as TaskBinding).tabId === tabId) return value as TaskBinding;
+  }
+  const old = await settings();
+  return old.chatTabId === tabId && old.chatTaskId ? taskBinding(old.chatTaskId) : null;
+}
+
+async function pageTask(tabId: number | undefined): Promise<GenerationTask | null> {
+  const binding = await bindingForTab(tabId);
+  if (!binding) return null;
+  const { task } = await api<{ task: GenerationTask }>(`/api/v1/tasks/${encodeURIComponent(binding.taskId)}`);
+  return isTerminalStatus(task.status) ? null : task;
+}
+
 class BridgeApiError extends Error {
   constructor(readonly status: number, readonly code: string, message: string) { super(message); }
 }
@@ -87,12 +121,11 @@ async function requirePageTask(message: MessageRecord, sender: { tab?: { id?: nu
   if (typeof message.taskId !== "string" || !/^task_[A-Za-z0-9_-]+$/.test(message.taskId)) {
     throw new Error("页面消息缺少有效任务 ID");
   }
-  const current = await settings();
   const task = (await api<{ task: GenerationTask }>(`/api/v1/tasks/${encodeURIComponent(message.taskId)}`)).task;
-  if (!isTrustedTaskMessage(task, message.taskId, sender.tab?.id, sender.tab?.url, message.bindingId, current.chatBindingId)) {
+  const binding = await taskBinding(task.id);
+  if (!binding || binding.tabId !== sender.tab?.id || !isTrustedTaskMessage(task, message.taskId, sender.tab?.id, sender.tab?.url, message.bindingId, binding.bindingId)) {
     throw new Error("页面消息与绑定任务或标签页不一致");
   }
-  if (current.chatTabId !== sender.tab?.id) await chrome.storage.local.set({ chatTabId: sender.tab?.id });
   return task;
 }
 
@@ -173,9 +206,14 @@ async function clickTrustedPoint(tabId: number, x: number, y: number): Promise<v
   }
 }
 
-async function bindTab(task: GenerationTask, tabId: number): Promise<string> {
-  const chatBindingId = crypto.randomUUID();
-  await chrome.storage.local.set({ taskId: task.id, chatTaskId: task.id, chatBindingId, chatTabId: tabId });
+async function bindTab(task: GenerationTask, tabId: number, canvasTabId?: number): Promise<string> {
+  const previous = await taskBinding(task.id);
+  const occupied = await bindingForTab(tabId);
+  if (occupied && occupied.taskId !== task.id) throw new Error("该网页已绑定另一个任务");
+  const chatBindingId = previous?.tabId === tabId ? previous.bindingId : crypto.randomUUID();
+  const binding: TaskBinding = { taskId: task.id, tabId, bindingId: chatBindingId, canvasTabId: canvasTabId ?? previous?.canvasTabId };
+  await chrome.storage.local.set({ [bindingKey(task.id)]: binding });
+  if (!task.simpleRender) await chrome.storage.local.set({ taskId: task.id, chatTaskId: task.id, chatBindingId, chatTabId: tabId, canvasTabId: binding.canvasTabId });
   return chatBindingId;
 }
 
@@ -192,39 +230,51 @@ async function taskTargetUrl(task: GenerationTask): Promise<string> {
     : "https://labs.google/fx/zh/tools/flow";
 }
 
-async function openTask(task: GenerationTask): Promise<{ task: GenerationTask; tabId: number; bindingId: string; reused: boolean }> {
+async function openTaskUnshared(task: GenerationTask, canvasTabId?: number): Promise<{ task: GenerationTask; tabId: number; bindingId: string; reused: boolean }> {
   const target = await taskTargetUrl(task);
-  const current = await settings();
-  if (current.chatTaskId === task.id && typeof current.chatTabId === "number") {
+  const current = await taskBinding(task.id);
+  if (current) {
     try {
-      const tab = await chrome.tabs.get(current.chatTabId) as { id: number; url?: string };
-      const bindingId = await bindTab(task, tab.id);
-      if (!isTaskGenerationUrl(task, tab.url)) await chrome.tabs.update(tab.id, { url: target, active: false });
+      const tab = await chrome.tabs.get(current.tabId) as { id: number; url?: string };
+      const bindingId = await bindTab(task, tab.id, canvasTabId);
+        if (!isTaskGenerationUrl(task, tab.url)) {
+          if (task.submittedAt) throw new Error("已提交任务的网页已离开原会话，不会重新发送");
+          await chrome.tabs.update(tab.id, { url: target, active: false });
+        }
       else {
         await notifyPage(tab.id, task);
       }
       return { task, tabId: tab.id, bindingId, reused: true };
     } catch { /* closed tab; create a new bound tab */ }
   }
+  if (task.submittedAt) throw new Error("已提交任务的网页已关闭，请恢复原会话后接管；不会重新发送");
   const tab = await chrome.tabs.create({ url: "about:blank", active: false }) as { id: number };
-  const bindingId = await bindTab(task, tab.id);
+  const bindingId = await bindTab(task, tab.id, canvasTabId);
   await chrome.tabs.update(tab.id, { url: target, active: false });
   return { task, tabId: tab.id, bindingId, reused: false };
 }
 
+function openTask(task: GenerationTask, canvasTabId?: number) {
+  const pending = openingTasks.get(task.id);
+  if (pending) return pending;
+  const operation = openTaskUnshared(task, canvasTabId).finally(() => openingTasks.delete(task.id));
+  openingTasks.set(task.id, operation);
+  return operation;
+}
+
 async function notifyPage(tabId: number, task: GenerationTask): Promise<void> {
   const current = await settings();
-  try { await chrome.tabs.sendMessage(tabId, { type: "task-ready", task, apiRoot: current.apiRoot, token: current.token, bindingId: current.chatBindingId }); }
+  const binding = await taskBinding(task.id);
+  if (!binding || binding.tabId !== tabId) return;
+  try { await chrome.tabs.sendMessage(tabId, { type: "task-ready", task, apiRoot: current.apiRoot, token: current.token, bindingId: binding.bindingId }); }
   catch { /* content script requests state after page load */ }
 }
 
 chrome.tabs.onUpdated.addListener(async (tabId: number, change: { status?: string }, tab: { url?: string }) => {
   if (change.status !== "complete" || !isSupportedGenerationUrl(tab.url)) return;
-  const current = await settings();
-  if (!current.taskId || current.chatTabId !== tabId) return;
   try {
-    const task = await currentTask();
-    if (task && task.id === current.taskId && isTaskGenerationUrl(task, tab.url)) await notifyPage(tabId, task);
+    const task = await pageTask(tabId);
+    if (task && isTaskGenerationUrl(task, tab.url)) await notifyPage(tabId, task);
   } catch { /* service unavailable: leave page untouched */ }
 });
 
@@ -246,8 +296,8 @@ chrome.runtime.onMessage.addListener((raw: unknown, sender: { tab?: { id?: numbe
       if (task.status === "queued") {
         task = (await api<{ task: GenerationTask }>(`/api/v1/tasks/${task.id}/claim`, { method: "POST", body: "{}" })).task;
       }
-      await chrome.storage.local.set({ taskId: task.id, canvasTabId: sender.tab.id });
-      const opened = await openTask(task);
+        const opened = await openTask(task, sender.tab.id);
+        if (message.focus === true) await chrome.tabs.update(opened.tabId, { active: true });
       sendResponse({ ok: true, ...opened }); return;
     }
     if (message.type === "popup-save") {
@@ -269,14 +319,15 @@ chrome.runtime.onMessage.addListener((raw: unknown, sender: { tab?: { id?: numbe
       const opened = await openTask(task); sendResponse({ ok: true, ...opened }); return;
     }
     if (message.type === "adapter-bind-current") {
-      const task = await currentTask();
+      const task = await pageTask(sender.tab?.id) ?? await currentTask();
+      if (task?.simpleRender && !(await bindingForTab(sender.tab?.id))) throw new Error("并发任务只能使用各自绑定网页，请从画布定位任务");
       if (!task || !isBindableTaskPage(task, sender.tab?.id, sender.tab?.url)) throw new Error("当前页面不是与任务来源匹配的生成页");
       const current = await settings();
       const bindingId = await bindTab(task, sender.tab!.id!);
       sendResponse({ ok: true, task, apiRoot: current.apiRoot, token: current.token, bindingId }); return;
     }
     if (message.type === "adapter-auto-bind-current") {
-      const task = await currentTask();
+      const task = await pageTask(sender.tab?.id);
       if (!task || !isAutoBindableTaskPage(task, sender.tab?.id, sender.tab?.url)) {
         throw new Error("当前页面不满足自动绑定条件");
       }
@@ -285,11 +336,12 @@ chrome.runtime.onMessage.addListener((raw: unknown, sender: { tab?: { id?: numbe
       sendResponse({ ok: true, task, apiRoot: current.apiRoot, token: current.token, bindingId }); return;
     }
     if (message.type === "adapter-get-state") {
-      const current = await settings(); const task = await currentTask();
-      if (!task || sender.tab?.id !== current.chatTabId || task.id !== current.taskId) {
+      const current = await settings(); const task = await pageTask(sender.tab?.id);
+      const binding = task ? await taskBinding(task.id) : null;
+      if (!task || !binding || sender.tab?.id !== binding.tabId) {
         sendResponse({ ok: true, task: null }); return;
       }
-      sendResponse({ ok: true, task, apiRoot: current.apiRoot, token: current.token, bindingId: current.chatBindingId }); return;
+      sendResponse({ ok: true, task, apiRoot: current.apiRoot, token: current.token, bindingId: binding.bindingId }); return;
     }
     if (message.type === "adapter-insert-flow-prompt") {
       const task = await requirePageTask(message, sender);
@@ -346,12 +398,14 @@ chrome.runtime.onMessage.addListener((raw: unknown, sender: { tab?: { id?: numbe
       if (event === "completed") {
         const response = await api<{ task: GenerationTask }>(`/api/v1/tasks/${task.id}/complete`, { method: "POST", body: JSON.stringify({ by: "extension" }) });
         if (response.task.status === "completed") {
-          const current = await settings();
-          if (typeof current.canvasTabId === "number") {
-            try { await chrome.tabs.sendMessage(current.canvasTabId, { type: "canvas-task-completed", taskId: response.task.id }); }
+          const binding = await taskBinding(task.id);
+          if (typeof binding?.canvasTabId === "number") {
+            try { await chrome.tabs.sendMessage(binding.canvasTabId, { type: "canvas-task-completed", taskId: response.task.id }); }
             catch { /* canvas polling remains as fallback */ }
           }
-          await chrome.storage.local.set({ taskId: "", chatTaskId: "", chatBindingId: "", chatTabId: null, canvasTabId: null });
+          await chrome.storage.local.remove(bindingKey(task.id));
+          const current = await settings();
+          if (current.taskId === task.id) await chrome.storage.local.set({ taskId: "", chatTaskId: "", chatBindingId: "", chatTabId: null, canvasTabId: null });
         }
         sendResponse({ ok: true, task: response.task }); return;
       }

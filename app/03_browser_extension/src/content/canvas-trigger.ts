@@ -27,7 +27,9 @@ window.addEventListener(RUN_EVENT, () => {
     publishStatus("error", "画布没有提供有效任务 ID");
     return;
   }
-  void chrome.runtime.sendMessage({ type: "canvas-run-task", taskId })
+  const focus = document.documentElement.getAttribute("data-gpt-canvas-focus-task") === "true";
+  document.documentElement.removeAttribute("data-gpt-canvas-focus-task");
+  void chrome.runtime.sendMessage({ type: "canvas-run-task", taskId, focus })
     .then((response: CanvasAutomationResponse) => {
       if (!response.ok) throw new Error(response.error ?? "扩展未能启动自动任务");
       publishStatus("started", `任务 ${taskId} 已进入全自动生成链路`);

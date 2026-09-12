@@ -1,6 +1,6 @@
 {
   "name": "@gpt-canvas/browser-extension",
-  "version": "1.5.22",
+  "version": "1.6.0",
   "private": true,
   "type": "module",
   "scripts": {

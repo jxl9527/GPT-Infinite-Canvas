@@ -5,7 +5,7 @@ import { bridgeBaseUrl, bridgeRequest } from "./bridge-client.mjs";
 import { readAuthorizedGeneratedImage } from "./image-file.mjs";
 
 const server = new McpServer(
-  { name: "d5-ai-canvas", version: "0.5.3" },
+  { name: "d5-ai-canvas", version: "0.6.0" },
   { instructions: "Use only these domain tools for D5 AI Canvas. Keep source folders read-only, require confirmed authorization for writes, preserve rejected candidates, retry scene-optimization structure risks within the authorized per-item budget, stop on failed final-glass validation, and never automatically select a final image." }
 );
 

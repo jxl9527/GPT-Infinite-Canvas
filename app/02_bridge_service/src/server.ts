@@ -12,6 +12,7 @@ import { readTaskAttachment, resolveTaskAttachments } from "./attachments.js";
 import type { CanvasAssetRepository } from "./canvas-asset-repository.js";
 import type { ProjectRuntimeManager } from "./project-runtime-manager.js";
 import type { ResultRepository } from "./result-repository.js";
+import { exportSimpleImages } from "./simple-export.js";
 
 export interface BridgeServerOptions {
   projects: ProjectRuntimeManager;
@@ -120,7 +121,7 @@ export function createBridgeServer(options: BridgeServerOptions): Server {
         response.setHeader("access-control-allow-origin", origin);
         response.setHeader("vary", "origin");
       }
-      response.setHeader("access-control-allow-headers", "content-type, x-bridge-token");
+      response.setHeader("access-control-allow-headers", "content-type, x-bridge-token, x-canvas-project");
       response.setHeader("access-control-allow-methods", "GET, POST, OPTIONS");
       if (request.method === "OPTIONS") { response.writeHead(204); response.end(); return; }
 
@@ -129,7 +130,8 @@ export function createBridgeServer(options: BridgeServerOptions): Server {
         send(response, 200, {
           ok: true,
           schemaVersion: "1.0",
-          releaseVersion: "0.5.3",
+          releaseVersion: "0.6.0",
+          simpleRenderConcurrency: 2,
           activeProjectId: current?.id ?? null,
           activeTaskId: current?.store.getActive()?.id ?? null
         });
@@ -171,9 +173,9 @@ export function createBridgeServer(options: BridgeServerOptions): Server {
         return;
       }
       if (request.method === "POST" && url.pathname === "/api/v1/workbench/prompts") {
-        const body = await readJson(request);
+        const body = await readJson(request, 4 * 1_048_576);
         if (!isRecord(body)) throw new ProtocolError("INVALID_INPUT", "提示词保存请求必须是 JSON 对象");
-        const prompt = await options.projects.savePrompt(body.id, body.title, body.content);
+        const prompt = await options.projects.savePrompt(body.id, body.title, body.content, body);
         send(response, 200, { ok: true, prompt });
         return;
       }
@@ -200,6 +202,7 @@ export function createBridgeServer(options: BridgeServerOptions): Server {
       }
 
       const project = options.projects.current();
+      if (request.headers["x-canvas-project"] && request.headers["x-canvas-project"] !== project?.id) throw new ProtocolError("TASK_LOCKED", "其他窗口已切换项目，请重新打开当前项目");
       if (!project) throw new ProtocolError("TASK_LOCKED", "请先在项目工作台选择或新建项目");
 
       if (request.method === "GET" && url.pathname === "/api/v1/canvas/project-requirements") {
@@ -224,7 +227,7 @@ export function createBridgeServer(options: BridgeServerOptions): Server {
           ok: true,
           capabilities: {
             schemaVersion: "1.0",
-            bridgeVersion: "0.5.3",
+            bridgeVersion: "0.6.0",
             pluginProtocolVersion: "1.0",
             activeProjectId: project.id,
             canvasProjectLoaded: Boolean(canvasProject),
@@ -384,7 +387,8 @@ export function createBridgeServer(options: BridgeServerOptions): Server {
       if (request.method === "POST" && url.pathname === "/api/v1/canvas/project") {
         const body = await readJson(request, 32 * 1_048_576);
         if (!isRecord(body)) throw new ProtocolError("INVALID_INPUT", "画布项目保存请求必须是 JSON 对象");
-        const saved = await project.canvasProject.save(body.project, body.forceSnapshot === true);
+        const saved = await project.canvasProject.save(body.project, body.forceSnapshot === true,
+          typeof body.expectedRevision === "number" ? body.expectedRevision : undefined);
         send(response, 200, { ok: true, ...saved }); return;
       }
       if (request.method === "POST" && url.pathname === "/api/v1/canvas/assets") {
@@ -439,6 +443,22 @@ export function createBridgeServer(options: BridgeServerOptions): Server {
       }
       if (request.method === "POST" && url.pathname === "/api/v1/tasks") {
         const input = parseCreateTaskInput(await readJson(request));
+        if (input.simpleRender) {
+          const document = project.canvasProject.read();
+          const preferences = document?.simple as { batch?: { id: string; prompt: string; concurrency: number; paused: boolean; items: Array<{ id: string; sourceVersionId: string }> } } | undefined;
+          const run = preferences?.batch;
+          if (!run || run.id !== input.simpleRender.batchId || run.prompt !== input.prompt || run.concurrency !== input.simpleRender.concurrency
+            || !run.items.some((item) => item.id === input.simpleRender!.itemId && item.sourceVersionId === input.simpleRender!.sourceVersionId)) throw new ProtocolError("INVALID_INPUT", "任务与已保存的批次快照不一致");
+          if (run.paused) throw new ProtocolError("TASK_LOCKED", "批次已暂停");
+          const versions = document?.versions as Array<{ id: string; assetId: string }> | undefined;
+          const version = versions?.find((item) => item.id === input.simpleRender!.sourceVersionId);
+          const assets = document?.assets as Array<{ id: string; original: { relativePath: string } }> | undefined;
+          const asset = assets?.find((item) => item.id === version?.assetId);
+          if (!asset || asset.original.relativePath !== input.attachments[0]?.relativePath
+            || input.target.localProject?.id !== project.id) throw new ProtocolError("INVALID_INPUT", "底图未保存在当前项目，不能发送");
+          const workflow = document?.workflow as { batchRun?: { status?: string } } | undefined;
+          if (workflow?.batchRun && workflow.batchRun.status !== "completed") throw new ProtocolError("TASK_LOCKED", "旧版批次尚未结束，请先从旧版入口处理");
+        }
         const attachments = await resolveTaskAttachments(project.projectRoot, input.attachments);
         const task = await project.store.create(input, attachments);
         send(response, 201, { ok: true, task }); return;
@@ -476,6 +496,11 @@ export function createBridgeServer(options: BridgeServerOptions): Server {
         if (!isRecord(body)) throw new ProtocolError("INVALID_INPUT", "结果请求体必须是 JSON 对象");
         const stored = await project.results.saveDataUrl(id, body.dataUrl, "visible-page");
         send(response, stored.deduplicated ? 200 : 201, { ok: true, ...stored }); return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/v1/canvas/export-images") {
+        const body = await readJson(request);
+        if (!isRecord(body)) throw new ProtocolError("INVALID_INPUT", "导出请求无效");
+        send(response, 200, { ok: true, ...await exportSimpleImages(project, body.directory, body.selections) }); return;
       }
       if (action === "text-result") {
         const body = await readJson(request, 256 * 1_024);

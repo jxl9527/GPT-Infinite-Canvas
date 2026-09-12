@@ -505,6 +505,7 @@ export interface CanvasProjectTaskLink {
 }
 
 export interface CanvasProjectDocument {
+  simple?: import("./simple-state.js").SimplePreferences;
   schemaVersion: "1.0" | "2.0";
   projectId: `project_${string}`;
   title: string;

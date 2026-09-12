@@ -41,7 +41,7 @@ test("v1 HTTP 完成附件读取、结果落盘去重、完成校验和脱敏诊
   };
   try {
     const health = await fetch(`${base}/health`).then((response) => response.json()) as { ok: boolean; releaseVersion: string; activeTaskId: string | null };
-    assert.equal(health.ok, true); assert.equal(health.releaseVersion, "0.5.3"); assert.equal(health.activeTaskId, null);
+    assert.equal(health.ok, true); assert.equal(health.releaseVersion, "0.6.0"); assert.equal(health.activeTaskId, null);
 
     const rejectedCanvasSession = await fetch(`${base}/api/v1/canvas/session`, {
       headers: { origin: "https://chatgpt.com" }

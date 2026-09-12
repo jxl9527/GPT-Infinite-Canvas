@@ -273,6 +273,7 @@ export interface TaskAttachment extends TaskAttachmentInput {
 }
 
 export interface CreateTaskInput {
+  simpleRender?: SimpleRenderIdentity;
   taskType: TaskType;
   responseMode?: ResponseMode;
   target: {
@@ -323,6 +324,7 @@ export interface HandoffRecord {
 }
 
 export interface GenerationTask {
+  simpleRender?: SimpleRenderIdentity;
   schemaVersion: typeof SCHEMA_VERSION;
   id: `task_${string}`;
   idempotencyKey: string;
@@ -482,7 +484,28 @@ export function parseCreateTaskInput(value: unknown): CreateTaskInput {
     ...(localProject ? { localProject } : {}),
     ...(outputCount ? { outputCount } : {})
   };
-  return { taskType: value.taskType as TaskType, responseMode, target, prompt, attachments };
+  const simpleRender = value.simpleRender === undefined ? undefined : parseSimpleRenderIdentity(value.simpleRender);
+  if (simpleRender && (provider !== "chatgpt" || chatMode !== "new" || responseMode !== "image" || attachments.length !== 1)) {
+    throw new ProtocolError("INVALID_INPUT", "简化渲染只接受一个底图、独立 ChatGPT 会话和图片输出");
+  }
+  return { taskType: value.taskType as TaskType, responseMode, target, prompt: simpleRender ? value.prompt as string : prompt, attachments, ...(simpleRender ? { simpleRender } : {}) };
+}
+
+export interface SimpleRenderIdentity {
+  batchId: string;
+  itemId: string;
+  sourceVersionId: string;
+  concurrency: 1 | 2;
+}
+
+export function parseSimpleRenderIdentity(value: unknown): SimpleRenderIdentity {
+  if (!isRecord(value) || !/^simple_[a-zA-Z0-9-]{1,80}$/.test(String(value.batchId))
+    || !/^item_[a-zA-Z0-9-]{1,80}$/.test(String(value.itemId))
+    || !/^version_[a-zA-Z0-9_-]{1,160}$/.test(String(value.sourceVersionId))
+    || (value.concurrency !== 1 && value.concurrency !== 2)) {
+    throw new ProtocolError("INVALID_INPUT", "简化渲染任务标识或并发数无效");
+  }
+  return { batchId: String(value.batchId), itemId: String(value.itemId), sourceVersionId: String(value.sourceVersionId), concurrency: value.concurrency };
 }
 
 export function assertGenerationTask(value: unknown): asserts value is GenerationTask {
@@ -495,4 +518,5 @@ export function assertGenerationTask(value: unknown): asserts value is Generatio
   if (value.responseMode !== undefined && !(RESPONSE_MODES as readonly unknown[]).includes(value.responseMode)) {
     throw new ProtocolError("INTERNAL_ERROR", "任务响应模式无效");
   }
+  if (value.simpleRender !== undefined) parseSimpleRenderIdentity(value.simpleRender);
 }

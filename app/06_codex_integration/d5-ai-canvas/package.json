@@ -1,6 +1,6 @@
 {
   "name": "@d5-ai-canvas/codex-plugin-runtime",
-  "version": "0.5.3",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
   "scripts": {

@@ -6,6 +6,7 @@ import type { WorkbenchProject } from "./bridge-client";
 import { projectIdFromUrl, urlForProject, urlForWorkbench } from "./project-route";
 import "./styles.css";
 import "./product-upgrades.css";
+import { SimpleWorkspace } from "./SimpleWorkspace";
 
 const root = document.getElementById("root");
 if (!root) throw new Error("未找到应用挂载节点");
@@ -35,6 +36,6 @@ function WorkspaceRoot() {
 
 createRoot(root).render(
   <StrictMode>
-    <WorkspaceRoot />
+    {new URLSearchParams(location.search).get("legacy") === "1" ? <WorkspaceRoot /> : <SimpleWorkspace />}
   </StrictMode>
 );
