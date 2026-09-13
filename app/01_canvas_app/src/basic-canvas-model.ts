@@ -65,4 +65,11 @@ export function annotationNode(a:AnnotationState):CanvasProjectNode {
   return {id:`node_${crypto.randomUUID()}`,type:a.type,...annotationBounds(a),rotation:0,scaleX:1,scaleY:1,zIndex:0,locked:false,visible:true,payload:{annotation:a}};
 }
 export function basicPanRequested(button:number,tool:BasicTool,space:boolean){return button===1||(button===0&&(tool==="pan"||space));}
+export function basicCompareClick(input:{versionId:string;generated:boolean;dx:number;dy:number;add:boolean;selectionCount:number;prior:{id:string;at:number}|null;at:number;threshold?:number;doubleClickMs?:number}):"open"|"double"|"none" {
+  const threshold=input.threshold??5;
+  if(!input.versionId||!input.generated||input.add||input.selectionCount!==1)return "none";
+  if(Math.abs(input.dx)>threshold||Math.abs(input.dy)>threshold)return "none";
+  const doubleClick=Boolean(input.prior&&input.prior.id===input.versionId&&input.at-input.prior.at<(input.doubleClickMs??250));
+  return doubleClick?"double":"open";
+}
 

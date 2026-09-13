@@ -3,7 +3,7 @@ import { Stage, Layer, Group, Rect, Text, Line, Arrow, Image as KImage } from "r
 import Konva from "konva";
 import type { CanvasProjectDocument, CanvasProjectNode } from "./project-state";
 import { annotationBounds, normalizeRectangle, type AnnotationState } from "./annotation-model";
-import { annotationNode, arrangeBasicObjects, basicObjects, basicPanRequested, deleteBasicObjects, moveBasicObjects, resizeBasicObject, selectBasicRect, type BasicTool } from "./basic-canvas-model";
+import { annotationNode, arrangeBasicObjects, basicCompareClick, basicObjects, basicPanRequested, deleteBasicObjects, moveBasicObjects, resizeBasicObject, selectBasicRect, type BasicTool } from "./basic-canvas-model";
 import { buildCanvasRelation, coverCrop } from "./canvas-layout";
 import { useAssetImage } from "./simple-asset-image";
 import { readCanvasAssetAsObjectUrl, releaseCanvasAssetObjectUrl } from "./bridge-client";
@@ -22,7 +22,7 @@ function Mark({a}:{a:AnnotationState}){
 export function BasicCanvas({doc,update,undo,canUndo,canRedo,hidden,onImport,onPreview,onCompare,onEditText,children}:{doc:CanvasProjectDocument;update:Update;undo(redo?:boolean):void;canUndo:boolean;canRedo:boolean;hidden:boolean;onImport(files:File[]):void;onPreview(image:{assetId:string;name:string;versionId:string}):void;onCompare(versionId:string):void;onEditText(id:string):void;children?:ReactNode}){
   const host=useRef<HTMLDivElement>(null),stage=useRef<Konva.Stage>(null);
   const [size,setSize]=useState({width:1000,height:700}),[tool,setTool]=useState<BasicTool>("select"),[space,setSpace]=useState(false),[gesture,setGesture]=useState<Gesture|null>(null);
-  const gestureRef=useRef<Gesture|null>(null),spaceRef=useRef(false),compareTimer=useRef<number|null>(null);
+  const gestureRef=useRef<Gesture|null>(null),spaceRef=useRef(false),compareTimer=useRef<number|null>(null),lastClick=useRef<{id:string;at:number}|null>(null);
   const [color,setColor]=useState("#bb3c35"),[editor,setEditor]=useState<{id:string;text:string;kind:"annotation"|"name"}|null>(null);
   const latest=useRef({doc,update,hidden,tool,onCompare});latest.current={doc,update,hidden,tool,onCompare};
   const ids=doc.simple!.selectedIds;
@@ -33,12 +33,15 @@ export function BasicCanvas({doc,update,undo,canUndo,canRedo,hidden,onImport,onP
     const {update,doc}=latest.current;
     if(g.kind==="pan"){update(d=>{d.canvas.viewport={x:g.vx+g.dx,y:g.vy+g.dy,scale:g.scale};return d;});return;}
     if(g.kind==="move" && (g.dx||g.dy)){update(d=>moveBasicObjects(d,g.ids,g.dx/g.scale,g.dy/g.scale),true);return;}
-    if(source==="up"&&g.kind==="move"&&!g.add&&Math.abs(g.dx)<=5&&Math.abs(g.dy)<=5&&g.ids.length===1){
+    if(source==="up"&&g.kind==="move"&&g.ids.length===1){
       const node=doc.canvas.nodes.find(n=>n.id===g.ids[0]);
       const versionId=node?.type==="image"?String(node.payload.imageVersionId):"";
-      if(versionId&&doc.versions.find(v=>v.id===versionId)?.parentVersionId){
-        if(compareTimer.current)window.clearTimeout(compareTimer.current);
-        compareTimer.current=window.setTimeout(()=>{compareTimer.current=null;latest.current.onCompare(versionId);},240);
+      const now=Date.now();
+      const decision=basicCompareClick({versionId,generated:Boolean(versionId&&doc.versions.find(v=>v.id===versionId)?.parentVersionId),dx:g.dx,dy:g.dy,add:g.add,selectionCount:g.ids.length,prior:lastClick.current,at:now});
+      lastClick.current=versionId?{id:versionId,at:now}:null;
+      if(decision!=="none"){
+        if(compareTimer.current){window.clearTimeout(compareTimer.current);compareTimer.current=null;}
+        if(decision==="open")compareTimer.current=window.setTimeout(()=>{compareTimer.current=null;latest.current.onCompare(versionId);},240);
       }
     }
     if(g.kind==="resize"){update(d=>resizeBasicObject(d,g.ids[0]!,g.width!+g.dx/g.scale,g.height!+g.dy/g.scale),true);return;}

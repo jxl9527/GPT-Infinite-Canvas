@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { annotationNode, arrangeBasicObjects, basicObjects, basicPanRequested, deleteBasicObjects, moveBasicObjects, resizeBasicObject, selectBasicRect } from "../src/basic-canvas-model.js";
+import { annotationNode, arrangeBasicObjects, basicCompareClick, basicObjects, basicPanRequested, deleteBasicObjects, moveBasicObjects, resizeBasicObject, selectBasicRect } from "../src/basic-canvas-model.js";
 import { EMPTY_CANVAS_WORKFLOW, type CanvasProjectDocument } from "../src/project-state.js";
 
 function fixture():CanvasProjectDocument {
@@ -16,6 +16,15 @@ test("基础画布所有工具中键均优先漫游，右键不会起框或拖�
   for(const tool of ["select","pan","text","arrow","freehand","rectangle"] as const)assert.equal(basicPanRequested(1,tool,false),true);
   assert.equal(basicPanRequested(0,"select",true),true);assert.equal(basicPanRequested(0,"pan",false),true);
   assert.equal(basicPanRequested(2,"pan",true),false);assert.equal(basicPanRequested(0,"select",false),false);
+});
+test("生成图单击打开对比，双击、拖动与多选不打开",()=>{
+  assert.equal(basicCompareClick({versionId:"version_x",generated:true,dx:0,dy:0,add:false,selectionCount:1,prior:null,at:1000}),"open");
+  assert.equal(basicCompareClick({versionId:"version_x",generated:true,dx:0,dy:0,add:false,selectionCount:1,prior:{id:"version_x",at:900},at:1000}),"double");
+  assert.equal(basicCompareClick({versionId:"version_x",generated:true,dx:6,dy:0,add:false,selectionCount:1,prior:null,at:1000}),"none");
+  assert.equal(basicCompareClick({versionId:"version_x",generated:true,dx:0,dy:-6,add:false,selectionCount:1,prior:null,at:1000}),"none");
+  assert.equal(basicCompareClick({versionId:"version_x",generated:false,dx:0,dy:0,add:false,selectionCount:1,prior:null,at:1000}),"none");
+  assert.equal(basicCompareClick({versionId:"version_x",generated:true,dx:0,dy:0,add:true,selectionCount:2,prior:null,at:1000}),"none");
+  assert.equal(basicCompareClick({versionId:"version_y",generated:true,dx:0,dy:0,add:false,selectionCount:1,prior:{id:"version_x",at:900},at:1000}),"open");
 });
 test("反向混合框选包含图片文字卡批注，整体移动同步批注坐标并保留锁定项",()=>{
   const d=fixture(),ids=selectBasicRect(d,600,300,-10,-10);assert.equal(ids.length,3);
