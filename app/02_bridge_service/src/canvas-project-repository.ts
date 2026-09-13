@@ -451,18 +451,27 @@ function validateProject(value: unknown): JsonObject {
   }
   if (value.simple !== undefined) {
     const simple = value.simple;
-    if (!isRecord(simple) || ![1, 2].includes(Number(simple.concurrency)) || typeof simple.draft !== "string" || simple.draft.length > 20_000
+    if (!isRecord(simple) || ![1, 2, 3].includes(Number(simple.concurrency)) || (simple.copiesPerImage !== undefined && ![1, 2, 3].includes(Number(simple.copiesPerImage)))
+      || typeof simple.draft !== "string" || simple.draft.length > 20_000
       || !Array.isArray(simple.selectedIds) || simple.selectedIds.some((id) => typeof id !== "string")) throw new ProtocolError("INVALID_INPUT", "简化画布设置无效");
     if (simple.batch !== null) {
       const batch = simple.batch;
       if (!isRecord(batch) || !/^simple_[a-zA-Z0-9-]+$/.test(String(batch.id)) || typeof batch.prompt !== "string" || !batch.prompt.trim() || batch.prompt.length > 20_000
-        || (batch.concurrency !== 1 && batch.concurrency !== 2) || typeof batch.paused !== "boolean" || !Array.isArray(batch.items) || !batch.items.length || batch.items.length > 200) throw new ProtocolError("INVALID_INPUT", "简化渲染批次无效");
+        || (batch.concurrency !== 1 && batch.concurrency !== 2 && batch.concurrency !== 3) || typeof batch.paused !== "boolean" || !Array.isArray(batch.items) || !batch.items.length || batch.items.length > 200) throw new ProtocolError("INVALID_INPUT", "简化渲染批次无效");
       const ids = new Set<string>();
       for (const item of batch.items) {
         if (!isRecord(item) || !/^item_[a-zA-Z0-9-]+$/.test(String(item.id)) || ids.has(String(item.id)) || !versionIds.has(String(item.sourceVersionId))
           || !["queued", "running", "completed", "failed", "cancelled"].includes(String(item.status)) || (item.taskId !== null && !/^task_[A-Za-z0-9_-]+$/.test(String(item.taskId)))
+          || (item.variantOrdinal !== undefined && (!Number.isInteger(item.variantOrdinal) || Number(item.variantOrdinal) < 1 || Number(item.variantOrdinal) > 1000))
           || !Array.isArray(item.resultVersionIds) || item.resultVersionIds.some((id) => !versionIds.has(String(id)))) throw new ProtocolError("INVALID_INPUT", "简化渲染任务或结果引用无效");
         ids.add(String(item.id));
+      }
+      for (const item of batch.items) {
+        if (!isRecord(item)) continue;
+        for (const field of ["clonedFromItemId", "retryOfItemId", "supersededByItemId"] as const) {
+          const reference = item[field];
+          if (reference !== undefined && !ids.has(String(reference))) throw new ProtocolError("INVALID_INPUT", `简化渲染任务引用无效：${field}`);
+        }
       }
     }
   }

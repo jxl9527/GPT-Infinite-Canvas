@@ -491,21 +491,24 @@ export function parseCreateTaskInput(value: unknown): CreateTaskInput {
   return { taskType: value.taskType as TaskType, responseMode, target, prompt: simpleRender ? value.prompt as string : prompt, attachments, ...(simpleRender ? { simpleRender } : {}) };
 }
 
+export type SimpleRenderConcurrency = 1 | 2 | 3;
+
 export interface SimpleRenderIdentity {
   batchId: string;
   itemId: string;
   sourceVersionId: string;
-  concurrency: 1 | 2;
+  concurrency: SimpleRenderConcurrency;
 }
 
 export function parseSimpleRenderIdentity(value: unknown): SimpleRenderIdentity {
+  const concurrency = Number(isRecord(value) ? value.concurrency : Number.NaN);
   if (!isRecord(value) || !/^simple_[a-zA-Z0-9-]{1,80}$/.test(String(value.batchId))
     || !/^item_[a-zA-Z0-9-]{1,80}$/.test(String(value.itemId))
     || !/^version_[a-zA-Z0-9_-]{1,160}$/.test(String(value.sourceVersionId))
-    || (value.concurrency !== 1 && value.concurrency !== 2)) {
+    || ![1, 2, 3].includes(concurrency)) {
     throw new ProtocolError("INVALID_INPUT", "简化渲染任务标识或并发数无效");
   }
-  return { batchId: String(value.batchId), itemId: String(value.itemId), sourceVersionId: String(value.sourceVersionId), concurrency: value.concurrency };
+  return { batchId: String(value.batchId), itemId: String(value.itemId), sourceVersionId: String(value.sourceVersionId), concurrency: concurrency as SimpleRenderConcurrency };
 }
 
 export function assertGenerationTask(value: unknown): asserts value is GenerationTask {

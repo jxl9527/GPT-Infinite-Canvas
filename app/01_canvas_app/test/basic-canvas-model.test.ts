@@ -10,7 +10,7 @@ function fixture():CanvasProjectDocument {
     canvas:{viewport:{x:0,y:0,scale:1},nodes:[{id:"node_image",type:"image",x:0,y:0,width:200,height:150,rotation:0,scaleX:1,scaleY:1,zIndex:0,locked:false,visible:true,payload:{imageVersionId:"version_test"}},annotation]},
     assets:[],versions:[{id:"version_test",assetId:"asset_test",parentVersionId:null,origin:"imported",taskId:null,createdAt:"now"}],taskLinks:[],
     workflow:{...structuredClone(EMPTY_CANVAS_WORKFLOW),textCards:[{id:"text_card_test",kind:"prompt",title:"note",text:"原文",x:240,y:0,width:320,height:240,sourceVersionId:"version_test",taskId:"task_test",createdAt:"now",updatedAt:"now"}]},
-    simple:{draft:"不改渲染",concurrency:2,selectedIds:[],batch:null}};
+    simple:{draft:"不改渲染",concurrency:2,copiesPerImage:1,selectedIds:[],batch:null}};
 }
 test("基础画布所有工具中键均优先漫游，右键不会起框或拖动",()=>{
   for(const tool of ["select","pan","text","arrow","freehand","rectangle"] as const)assert.equal(basicPanRequested(1,tool,false),true);

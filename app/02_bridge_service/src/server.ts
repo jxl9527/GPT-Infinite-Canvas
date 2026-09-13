@@ -131,7 +131,7 @@ export function createBridgeServer(options: BridgeServerOptions): Server {
           ok: true,
           schemaVersion: "1.0",
           releaseVersion: "0.6.0",
-          simpleRenderConcurrency: 2,
+          simpleRenderConcurrency: 3,
           activeProjectId: current?.id ?? null,
           activeTaskId: current?.store.getActive()?.id ?? null
         });

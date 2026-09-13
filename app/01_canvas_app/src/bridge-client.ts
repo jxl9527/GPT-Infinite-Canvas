@@ -21,10 +21,16 @@ interface ApiErrorBody {
   };
 }
 
+let simpleConcurrencyLimit: 1 | 2 | 3 = 2;
+
+export function bridgeSimpleConcurrencyLimit(): 1 | 2 | 3 { return simpleConcurrencyLimit; }
+
 export async function assertSimpleBridgeReady(): Promise<void> {
   const response = await fetch(`${BRIDGE_BASE_URL}/health`);
   const health = await response.json() as { simpleRenderConcurrency?: number };
-  if (!response.ok || health.simpleRenderConcurrency !== 2) throw new Error("本地服务尚未更新。请先在旧版处理未结束任务，再启动 0.6.0 新版。");
+  const advertised = Math.trunc(Number(health.simpleRenderConcurrency));
+  if (!response.ok || advertised < 2 || advertised > 3) throw new Error("本地服务尚未更新。请先在旧版处理未结束任务，再启动新版。");
+  simpleConcurrencyLimit = advertised === 3 ? 3 : 2;
 }
 
 export class BridgeApiError extends Error {

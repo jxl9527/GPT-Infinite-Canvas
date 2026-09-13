@@ -3,7 +3,8 @@ import type { GenerationTask } from "@gpt-canvas/shared";
 import { BridgeApiError, bindCanvasProject, cancelGenerationTask, createGenerationTask, importCanvasAsset, listGenerationTasks, preserveCanvasConflictDraft, readCanvasProject, readFileAsDataUrl, readGenerationResultAsDataUrl, saveCanvasAssetDerivatives, saveCanvasProject, saveGeneratedAsset } from "./bridge-client";
 import { createImageDerivatives } from "./image-derivatives";
 import { EMPTY_CANVAS_WORKFLOW, type CanvasProjectDocument } from "./project-state";
-import { appendImage, batchFinished, emptySimplePreferences, makeSimpleBatch, nextSimpleItem, simpleBlockingTask, simpleTaskInput } from "./simple-state";
+import { appendImage, appendSimpleVariant, batchFinished, emptySimplePreferences, makeSimpleBatch, nextSimpleItem, pendingSlots, retrySimpleItem, simpleBlockingTask, simpleSlotBounds, simpleTaskInput } from "./simple-state";
+import { fitImportedImage } from "./canvas-layout.js";
 import type { CanvasTextCard } from "./text-card";
 import { automationExtensionVersionSupported } from "./canvas-automation";
 
@@ -106,15 +107,26 @@ export function useSimpleProject(projectId: string, projectName: string) {
             if (item.taskId !== task.id) update((doc) => { const row = doc.simple!.batch!.items.find((entry) => entry.id === item.id)!; row.taskId = task.id; row.status = "running"; return doc; });
             if (task.status === "completed" && item.status !== "completed") {
               if (!task.results.length) throw new Error("任务已结束但未返回图片，请在网页检查结果");
-              for (const result of task.results) {
+              for (const [index, result] of task.results.entries()) {
                 const versionId = `version_${task.id}_${result.id}` as const;
                 if (ref.current!.versions.some((entry) => entry.id === versionId)) continue;
+                const baseName = item.sourceName.replace(/\.[^.]+$/, "");
+                const outputName = task.results.length > 1 ? `${baseName}_${index + 1}_生成` : `${baseName}_生成`;
                 const dataUrl = await readGenerationResultAsDataUrl(task.id, result.id);
-                const imported = await saveGeneratedAsset(`${item.sourceName.replace(/\.[^.]+$/, "")}_生成.png`, dataUrl);
+                const imported = await saveGeneratedAsset(`${outputName}.png`, dataUrl);
                 const derivatives = await createImageDerivatives(dataUrl);
                 await saveCanvasAssetDerivatives(imported.asset.id, derivatives.displayDataUrl, derivatives.thumbnailDataUrl);
                 if (!alive.current) return;
-                update((doc) => appendImage(doc, imported.asset, `${item.sourceName.replace(/\.[^.]+$/, "")}_生成`, { versionId, taskId: task.id, parentVersionId: item.sourceVersionId as `version_${string}` }));
+                update((doc) => {
+                  const run = doc.simple!.batch!;
+                  const row = run.items.find((entry) => entry.id === item.id);
+                  const slot = row ? pendingSlots(run.items).get(row.id) ?? 0 : 0;
+                  const source = doc.canvas.nodes.find((node) => node.payload.imageVersionId === item.sourceVersionId);
+                  const siblings = doc.canvas.nodes.filter((node) => doc.versions.find((v) => v.id === node.payload.imageVersionId)?.parentVersionId === item.sourceVersionId);
+                  const size = fitImportedImage(imported.asset.original.width, imported.asset.original.height);
+                  const bounds = source ? simpleSlotBounds(source, siblings, slot, size) : undefined;
+                  return appendImage(doc, imported.asset, outputName, { versionId, taskId: task.id, parentVersionId: item.sourceVersionId as `version_${string}`, width: imported.asset.original.width, height: imported.asset.original.height, bounds });
+                });
                 history.current = { before: [], after: [] };
               }
               update((doc) => {
@@ -180,16 +192,30 @@ export function useSimpleProject(projectId: string, projectName: string) {
     const doc = ref.current!;
     if (!batchFinished(doc.simple!.batch)) throw new Error("请先完成或停止当前批次");
     if (doc.workflow?.batchRun && doc.workflow.batchRun.status !== "completed") throw new Error("旧版批次尚未结束，请从设置中的旧版入口处理");
-    const run = makeSimpleBatch(doc, doc.simple!.selectedIds, doc.simple!.draft, doc.simple!.concurrency);
+    const run = makeSimpleBatch(doc, doc.simple!.selectedIds, doc.simple!.draft, doc.simple!.concurrency, doc.simple!.copiesPerImage);
     update((current) => { current.simple!.batch = run; return current; }); await save();
-    setNotice(`已建立 ${run.items.length} 张图片的渲染批次`);
+    setNotice(`已建立 ${run.items.length} 个任务的渲染批次`);
   };
 
   const stop = async () => { update((doc) => { const batch = doc.simple!.batch; if (batch) { batch.paused = true; for (const item of batch.items) if (item.status === "queued" || item.status === "failed") item.status = "cancelled"; } return doc; }); await save(); setNotice("已停止后续任务；已发送的图片继续生成并回收"); };
   const pause = async (paused: boolean) => { update((doc) => { if (doc.simple!.batch) doc.simple!.batch.paused = paused; return doc; }); await save(); };
   const endTracking = async (taskId: string) => { await cancelGenerationTask(taskId); setNotice("已结束本地跟踪，网页上已提交的生成不会被撤回"); };
   const retry = async (itemId: string) => {
-    update((doc) => { const batch = doc.simple!.batch!; const row = batch.items.find((entry) => entry.id === itemId)!; if (row.status !== "failed" && row.status !== "cancelled") return doc; row.id = `item_${crypto.randomUUID()}`; row.status = "queued"; row.taskId = null; row.error = ""; batch.paused = false; return doc; }); await save();
+    const current = ref.current!;
+    const result = retrySimpleItem(current.simple!.batch!, itemId);
+    update((doc) => { doc.simple!.batch = result.batch; if (!result.wasCancelled) doc.simple!.batch!.paused = false; return doc; });
+    await save();
+    setNotice(result.wasCancelled ? "已按相同设置加入队列；点击“继续”后开始生成" : "已按相同设置建立新的生成任务");
+    return result.replacementId;
+  };
+  const appendVariant = async (sourceVersionId: string) => {
+    const current = ref.current!;
+    const batch = current.simple!.batch;
+    if (!batch || batchFinished(batch)) throw new Error("当前没有进行中的批次");
+    const next = appendSimpleVariant(batch, sourceVersionId, 1);
+    update((doc) => { doc.simple!.batch = next; return doc; });
+    await save();
+    setNotice(next.paused ? "已按相同设置追加 1 个版本；点击“继续”后开始生成" : "已按相同设置追加 1 个版本，提交后自动开始生成");
   };
   const recover = async () => {
     if (!ref.current) return;
@@ -204,5 +230,5 @@ export function useSimpleProject(projectId: string, projectName: string) {
     const previous = from.pop(); if (!previous || !ref.current) return;
     to.push(frame(ref.current)); update((doc) => { doc.canvas.nodes = previous.nodes; if (doc.workflow) doc.workflow.textCards = previous.textCards; return doc; });
   };
-  return { document, ref, update, save, notice, setNotice, saveError, saving, ready, loadingError, tasks, importFiles, start, stop, pause, endTracking, retry, recover, undo, sendToExtension, lockNotice, canUndo: history.current.before.length > 0, canRedo: history.current.after.length > 0 };
+  return { document, ref, update, save, notice, setNotice, saveError, saving, ready, loadingError, tasks, importFiles, start, stop, pause, endTracking, retry, appendVariant, recover, undo, sendToExtension, lockNotice, canUndo: history.current.before.length > 0, canRedo: history.current.after.length > 0 };
 }

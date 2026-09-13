@@ -20,7 +20,7 @@ test("并行保存只接受一个新版本，旧界面保存保留简化模式�
   const legacy: Record<string, unknown> = { ...latest, revision: 2 }; delete legacy.simple;
   await repo.save(legacy);
   assert.deepEqual(repo.read()!.simple, doc.simple);
-  await assert.rejects(repo.save({ ...repo.read(), revision: 3, simple: { ...doc.simple, concurrency: 3 } }));
+  await assert.rejects(repo.save({ ...repo.read(), revision: 3, simple: { ...doc.simple, concurrency: 4 } }));
 });
 
 test("提示词并行收录和更新保留版本与备份，普通导出不覆盖同名原图", async () => {
