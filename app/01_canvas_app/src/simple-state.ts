@@ -50,6 +50,11 @@ export function simpleTaskInput(document: CanvasProjectDocument, batch: SimpleBa
   };
 }
 
+export function simpleBlockingTask(batch: SimpleBatch, tasks: readonly GenerationTask[]): GenerationTask | null {
+  return tasks.find((task) => !["completed", "failed", "cancelled"].includes(task.status)
+    && (!task.simpleRender || task.simpleRender.batchId !== batch.id)) ?? null;
+}
+
 export function nextSimpleItem(batch: SimpleBatch, tasks: readonly GenerationTask[]): SimpleItem | null {
   if (batch.paused) return null;
   const known = tasks.filter((task) => task.simpleRender?.batchId === batch.id);

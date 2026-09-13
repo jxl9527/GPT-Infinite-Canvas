@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { CanvasImageAsset, GenerationTask } from "@gpt-canvas/shared";
 import type { CanvasProjectDocument } from "../src/project-state.js";
-import { appendImage, makeSimpleBatch, nextSimpleItem, simpleTaskInput } from "../src/simple-state.js";
+import { appendImage, makeSimpleBatch, nextSimpleItem, simpleBlockingTask, simpleTaskInput } from "../src/simple-state.js";
 
 const asset: CanvasImageAsset = { id: "asset_a", originalName: "建筑.png", kind: "imported", createdAt: "now", original: { width: 1200, height: 800, relativePath: "assets/originals/a.png", mime: "image/png", bytes: 100, sha256: "a".repeat(64) } };
 const blank = (): CanvasProjectDocument => ({ schemaVersion: "2.0", projectId: "project_123", title: "建筑", createdAt: "now", updatedAt: "now", revision: 0, canvas: { viewport: { x: 0, y: 0, scale: 1 }, nodes: [] }, assets: [], versions: [], taskLinks: [] });
@@ -28,6 +28,19 @@ test("双任务排程等待前项提交，第二项先完成可补位，暂停�
   delete tasks[0]!.submittedAt; assert.equal(nextSimpleItem(batch, tasks), null);
   tasks[0]!.submittedAt = "now"; tasks[0]!.status = "needs-user"; assert.equal(nextSimpleItem(batch, tasks), null);
   tasks[0]!.status = "generating"; batch.paused = true; assert.equal(nextSimpleItem(batch, tasks), null);
+});
+
+test("占用生成名额的非本批任务被识别为锁，完成或取消后解除", () => {
+  let doc = blank(); doc = appendImage(doc, asset, "图A");
+  const batch = makeSimpleBatch(doc, doc.canvas.nodes.map((n) => n.id), "生成图片", 2);
+  const own = { id: "task_own", simpleRender: { batchId: batch.id, itemId: batch.items[0]!.id }, status: "generating" } as unknown as GenerationTask;
+  assert.equal(simpleBlockingTask(batch, [own]), null);
+  const legacy = { id: "task_legacy", status: "submitted" } as unknown as GenerationTask;
+  assert.equal(simpleBlockingTask(batch, [own, legacy])?.id, "task_legacy");
+  legacy.status = "completed"; assert.equal(simpleBlockingTask(batch, [own, legacy]), null);
+  const otherBatch = { id: "task_other", simpleRender: { batchId: "simple_other", itemId: "item_x" }, status: "generating" } as unknown as GenerationTask;
+  assert.equal(simpleBlockingTask(batch, [otherBatch])?.id, "task_other");
+  otherBatch.status = "cancelled"; assert.equal(simpleBlockingTask(batch, [otherBatch]), null);
 });
 
 test("乱序结果按父图右置且幂等，保留旧批注与版本", () => {

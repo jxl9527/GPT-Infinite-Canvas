@@ -123,10 +123,32 @@ async function requirePageTask(message: MessageRecord, sender: { tab?: { id?: nu
   }
   const task = (await api<{ task: GenerationTask }>(`/api/v1/tasks/${encodeURIComponent(message.taskId)}`)).task;
   const binding = await taskBinding(task.id);
-  if (!binding || binding.tabId !== sender.tab?.id || !isTrustedTaskMessage(task, message.taskId, sender.tab?.id, sender.tab?.url, message.bindingId, binding.bindingId)) {
+  const senderTabId = sender.tab?.id;
+  const trusted = Boolean(binding && binding.tabId === senderTabId
+    && isTrustedTaskMessage(task, message.taskId, senderTabId, sender.tab?.url, message.bindingId, binding.bindingId));
+  if (!trusted) {
+    const sameTabSameTask = Boolean(binding && binding.tabId === senderTabId && !isTerminalStatus(task.status)
+      && isTaskGenerationUrl(task, sender.tab?.url));
+    if (sameTabSameTask && typeof message.bindingId === "string" && message.bindingId.length >= 16) {
+      await recordBindingDiagnostic("nonce-healed", task.id, senderTabId, sender.tab?.url, binding!.bindingId, message.bindingId as string);
+      await chrome.storage.local.set({ [bindingKey(task.id)]: { ...binding!, bindingId: message.bindingId } });
+      return task;
+    }
+    await recordBindingDiagnostic(sameTabSameTask ? "rejected-nonce" : "rejected", task.id, senderTabId, sender.tab?.url, binding?.bindingId, typeof message.bindingId === "string" ? message.bindingId : "");
     throw new Error("页面消息与绑定任务或标签页不一致");
   }
   return task;
+}
+
+async function recordBindingDiagnostic(event: string, taskId: string, senderTabId: number | undefined,
+  senderUrl: string | undefined, storedBindingId: string | undefined, messageBindingId: string): Promise<void> {
+  const key = "binding-diagnostics";
+  try {
+    const stored = (await chrome.storage.local.get(key))[key] as Array<Record<string, unknown>> | undefined;
+    const list = Array.isArray(stored) ? stored.slice(-19) : [];
+    list.push({ at: new Date().toISOString(), event, taskId, senderTabId, senderUrl, storedBindingId, messageBindingId });
+    await chrome.storage.local.set({ [key]: list });
+  } catch { return; }
 }
 
 async function insertTrustedText(tabId: number, text: string): Promise<void> {

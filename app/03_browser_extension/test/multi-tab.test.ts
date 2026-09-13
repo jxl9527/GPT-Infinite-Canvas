@@ -51,6 +51,11 @@ test("真实后台逻辑：双网页独立绑定、错误结果拒收、完成�
   const tabA = tabs.get(a.tabId)!; const tabB = tabs.get(b.tabId)!;
   assert.equal((await message({ type: "adapter-get-state" }, tabA)).task.id, "task_a");
   assert.equal((await message({ type: "adapter-get-state" }, tabB)).task.id, "task_b");
+  const stale = await message({ type: "adapter-event", taskId: "task_a", bindingId: "stale-nonce-1234567890", event: "generating" }, tabA);
+  assert.equal(stale.ok, true);
+  assert.equal((stored["binding-diagnostics"] as any[]).at(-1)?.event, "nonce-healed");
+  const healed = await message({ type: "adapter-event", taskId: "task_a", bindingId: "stale-nonce-1234567890", event: "generating" }, tabA);
+  assert.equal(healed.ok, true);
   const wrong = await message({ type: "adapter-event", taskId: "task_a", bindingId: a.bindingId, event: "completed" }, tabB);
   assert.equal(wrong.ok, false); assert.notEqual(tasks.task_a.status, "completed");
   makeContext();

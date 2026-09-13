@@ -8,6 +8,8 @@ import type {
 } from "@gpt-canvas/shared";
 import type { CanvasProjectDocument } from "./project-state";
 import type { CanvasBatchRun, WorkflowStage } from "./project-state";
+import type { PromptLibraryItem } from "./prompt-library-item.js";
+export type { PromptLibraryItem };
 
 const BRIDGE_BASE_URL = (import.meta.env.VITE_BRIDGE_BASE_URL as string | undefined)?.replace(/\/$/, "")
   ?? "http://127.0.0.1:3220";
@@ -82,19 +84,6 @@ export interface ActiveProjectRequirements {
   generationContext: string;
   content?: string;
   sections: ProjectRequirementSection[];
-}
-
-export interface PromptLibraryItem {
-  id: string;
-  title: string;
-  content: string;
-  createdAt: string;
-  updatedAt: string;
-  category?: string;
-  inputHint?: string;
-  coverDataUrl?: string;
-  coverLabel?: string;
-  version?: number;
 }
 
 export interface DeliveryTarget {

@@ -3,7 +3,7 @@ import type { GenerationTask } from "@gpt-canvas/shared";
 import { BridgeApiError, bindCanvasProject, cancelGenerationTask, createGenerationTask, importCanvasAsset, listGenerationTasks, preserveCanvasConflictDraft, readCanvasProject, readFileAsDataUrl, readGenerationResultAsDataUrl, saveCanvasAssetDerivatives, saveCanvasProject, saveGeneratedAsset } from "./bridge-client";
 import { createImageDerivatives } from "./image-derivatives";
 import { EMPTY_CANVAS_WORKFLOW, type CanvasProjectDocument } from "./project-state";
-import { appendImage, batchFinished, emptySimplePreferences, makeSimpleBatch, nextSimpleItem, simpleTaskInput } from "./simple-state";
+import { appendImage, batchFinished, emptySimplePreferences, makeSimpleBatch, nextSimpleItem, simpleBlockingTask, simpleTaskInput } from "./simple-state";
 import type { CanvasTextCard } from "./text-card";
 import { automationExtensionVersionSupported } from "./canvas-automation";
 
@@ -11,6 +11,7 @@ export function useSimpleProject(projectId: string, projectName: string) {
   const [document, setDocument] = useState<CanvasProjectDocument | null>(null);
   const ref = useRef<CanvasProjectDocument | null>(null);
   const [notice, setNotice] = useState(""); const [saveError, setSaveError] = useState("");
+  const [lockNotice, setLockNotice] = useState("");
   const [saving, setSaving] = useState(false); const [tasks, setTasks] = useState<GenerationTask[]>([]);
   const [ready, setReady] = useState(false); const [loadingError, setLoadingError] = useState("");
   const saved = useRef(-1); const queue = useRef<Promise<unknown>>(Promise.resolve());
@@ -98,7 +99,7 @@ export function useSimpleProject(projectId: string, projectName: string) {
           await save();
           const known = await listGenerationTasks(); if (!alive.current) return; setTasks(known);
           const batch = ref.current?.simple?.batch;
-          if (!batch || batchFinished(batch)) return;
+          if (!batch || batchFinished(batch)) { if (alive.current) setLockNotice(""); return; }
           for (const task of known.filter((entry) => entry.simpleRender?.batchId === batch.id)) {
             const item = ref.current?.simple?.batch?.items.find((entry) => entry.id === task.simpleRender?.itemId);
             if (!item || !ref.current || !alive.current) continue;
@@ -140,12 +141,15 @@ export function useSimpleProject(projectId: string, projectName: string) {
           if (!current || !run || !extensionReady()) return;
           const next = nextSimpleItem(run, known);
           if (!next) return;
+          const blocker = simpleBlockingTask(run, known);
+          if (blocker) { if (alive.current) setLockNotice(`已有旧版任务 ${blocker.id} 占用生成名额，请打开旧版兼容工作台完成或结束其本地跟踪`); return; }
           try {
             const task = await createGenerationTask(simpleTaskInput(current, run, next, projectId));
             update((doc) => { const row = doc.simple!.batch!.items.find((entry) => entry.id === next.id)!; row.taskId = task.id; row.status = "running"; return doc; });
-            await save(); sendToExtension(task);
+            await save(); sendToExtension(task); if (alive.current) setLockNotice("");
           } catch (error) {
             if (!(error instanceof BridgeApiError && error.code === "TASK_LOCKED")) throw error;
+            if (alive.current) setLockNotice((error as Error).message);
           }
         });
       } catch (error) { if (alive.current) setNotice((error as Error).message); }
@@ -200,5 +204,5 @@ export function useSimpleProject(projectId: string, projectName: string) {
     const previous = from.pop(); if (!previous || !ref.current) return;
     to.push(frame(ref.current)); update((doc) => { doc.canvas.nodes = previous.nodes; if (doc.workflow) doc.workflow.textCards = previous.textCards; return doc; });
   };
-  return { document, ref, update, save, notice, setNotice, saveError, saving, ready, loadingError, tasks, importFiles, start, stop, pause, endTracking, retry, recover, undo, sendToExtension };
+  return { document, ref, update, save, notice, setNotice, saveError, saving, ready, loadingError, tasks, importFiles, start, stop, pause, endTracking, retry, recover, undo, sendToExtension, lockNotice, canUndo: history.current.before.length > 0, canRedo: history.current.after.length > 0 };
 }
