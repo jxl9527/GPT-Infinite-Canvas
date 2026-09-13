@@ -2,12 +2,12 @@
 
 更新日期：2026-09-13。本文记录当前工作区事实及待办，不取代用户后续指令。
 
-> 最新交接记录：[2026-09-13 生成入口提示与官方模板接入](交接记录/2026-09-13_生成入口提示与官方模板接入.md)。一句话结论：已补齐“重新生成”连接提示、`TASK_LOCKED`/旧版入口可见，并把 5 张 GPT Image 2.5 官方骨架模板加入内置图库；同日真实双任务验收先暴露**偶发绑定失效缺陷**（第一张掉线、需人工重绑），已加同标签页 nonce 自愈与 `binding-diagnostics` 留痕；当晚复测双任务 2/2 全自动回图、缺陷未复现、自愈未触发，仍属观察中，不能宣称根治；仍未做本轮 UI 浏览器实测、用户验收与提交。
+> 最新交接记录：[2026-09-13 生成入口提示与官方模板接入](交接记录/2026-09-13_生成入口提示与官方模板接入.md)。一句话结论：已补齐“重新生成”连接提示、`TASK_LOCKED`/旧版入口可见，并把 5 张 GPT Image 2.5 官方骨架模板加入内置图库；真实双任务验收先暴露**偶发绑定失效缺陷**（第一张掉线、需人工重绑），已加同标签页 nonce 自愈与 `binding-diagnostics` 留痕；复测双任务 2/2 全自动回图但缺陷未复现，属观察中，不能宣称根治。全部改动已提交并推送（`0563c23`）；仍未做本轮 UI 浏览器实测与用户验收。
 
 ## 1. 先看结论
 
 - 项目已从复杂阶段工作台改为“固定提示词图库 → 复制提示词 → 图片画布 → ChatGPT 网页生成 → 回图”。不要重新引入旧版三阶段门禁、强制提词或验收流程。
-- 简化后误删的画布基础交互已恢复并做过浏览器回归。当前最新修复仍在本地工作区，**尚未提交、尚未推送**；仅拉取 GitHub 无法获得这些改动。
+- 简化后误删的画布基础交互已恢复并做过浏览器回归；基础交互、生成提示、内置模板与扩展绑定自愈已随 `0563c23` 提交并推送，拉取 GitHub 即可获得。
 - 用户曾反馈“用不了”，随后明确指的是图片生成。已查出内置浏览器缺少画布扩展，以及旧任务占用生成名额；处理见第 5 节。
 - 2026-09-13 只读核对时，真实项目已出现多条后续完成并回收图片的任务记录；不能继续沿用“始终无法生成”的旧结论，也不能据此宣称所有生成场景已验收。
 - 用户最新要求是做好交接，方便其他 AI 继续。本轮不修改生成业务、不发布安装包。
@@ -19,43 +19,26 @@
 | 工程根目录 | `D:\OneDrive - 静超科技\D5-AI-Pipeline\canvas` |
 | 上一级目录 | `D:\OneDrive - 静超科技\D5-AI-Pipeline`，不是 Git 仓库根目录 |
 | 当前分支 | `agent/canvas-simple-prompt-library` |
-| HEAD | `041529fa6fb9bcd3da0dab4b1126403240090c42` |
-| HEAD 内容 | `feat: simplify canvas with prompt gallery and isolated dual render tasks` |
-| 本地远程跟踪引用 | `origin/agent/canvas-simple-prompt-library` 同为 `041529f`；本次未联网 fetch |
+| HEAD | `0563c23`（`feat: 恢复画布基础交互并加固简化版双任务生成`） |
+| 上一次提交 | `041529f`（`feat: simplify canvas with prompt gallery and isolated dual render tasks`） |
+| 本地远程跟踪引用 | `origin/agent/canvas-simple-prompt-library` 同为 `0563c23`，已 fetch + push 验证 |
 | GitHub | `https://github.com/jxl9527/GPT-Infinite-Canvas.git` |
 | 旧稳定版 | `agent/d5-workflow-v2`，历史基准 `9318624` |
 | 基础交互历史 | `40e3b60`、`dc63b41`，结合回归保护基线查阅 |
 
-接手先运行 `git status --short` 和 `git diff`。不要 reset/clean，不要把新增但未跟踪的文件当作临时文件删除。
+接手先运行 `git status --short` 和 `git diff`。不要 reset/clean，不要把新增文件当作临时文件删除。2026-09-13 结束时的状态是**工作区干净、已提交已推送**；若接手时看到未提交改动，那是之后产生的新工作，需先弄清来源。
 
-当前未提交实现：
+已提交内容（`0563c23`，23 个文件，814 插入 / 148 删除）：
 
-| 文件（相对工程根目录） | 状态与用途 |
+| 主题 | 代表文件 |
 | --- | --- |
-| `app/01_canvas_app/src/BasicCanvas.tsx` | 新增；画布基础工具、鼠标手势、快捷键、图片与文字卡、批注、选区、尺寸及下载 |
-| `app/01_canvas_app/src/basic-canvas-model.ts` | 新增；混合对象移动/选择/删除/尺寸/整理等纯函数 |
-| `app/01_canvas_app/src/simple-asset-image.ts` | 新增；从原组件抽出的图片加载与对象 URL 释放，最多 4 路解码 |
-| `app/01_canvas_app/test/basic-canvas-model.test.ts` | 新增 5 项回归测试 |
-| `app/01_canvas_app/src/SimpleCanvas.tsx` | 接入 BasicCanvas；导出仅筛图片；生成扩展版本提示和按钮可用性 |
-| `app/01_canvas_app/src/use-simple-project.ts` | 暴露 canUndo/canRedo；此次基础功能修复未重写生成排程 |
-| `app/01_canvas_app/src/simple.css` | 基础工具、编辑框、浮动操作和窄屏样式 |
-| `docs/已修复问题与回归保护基线.md` | 追加基础交互恢复及验证记录 |
+| 基础画布交互恢复 | `BasicCanvas.tsx`、`basic-canvas-model.ts`、`simple-asset-image.ts`、`test/basic-canvas-model.test.ts`、`simple.css` |
+| 生成入口提示与锁 | `SimpleCanvas.tsx`、`use-simple-project.ts`、`simple-state.ts`、`test/simple-state.test.ts` |
+| 官方骨架内置模板 | `prompt-starters.ts`、`prompt-library-item.ts`、`bridge-client.ts`、`test/prompt-starters.test.ts` |
+| 扩展绑定自愈与诊断 | `app/03_browser_extension/src/background.ts`、`test/multi-tab.test.ts` |
+| 交接与基线文档 | 本文、`docs/交接记录/`、`docs/已修复问题与回归保护基线.md`、`AGENTS.md`、README 及 3 份提示词文档 |
 
-2026-09-13 后续在同一工作区继续完成（仍未提交）：
-
-| 文件（相对工程根目录） | 状态与用途 |
-| --- | --- |
-| `app/01_canvas_app/src/SimpleCanvas.tsx` | 追加“重新生成”连接禁用与共用提示；追加 `lockNotice` 队列提示与旧版入口 |
-| `app/01_canvas_app/src/use-simple-project.ts` | 追加 `lockNotice`；创建任务前检测非本批活动任务，不再静默吞掉 `TASK_LOCKED` |
-| `app/01_canvas_app/src/simple-state.ts` | 新增纯函数 `simpleBlockingTask` |
-| `app/01_canvas_app/test/simple-state.test.ts` | 新增 1 项锁占用测试 |
-| `app/01_canvas_app/src/prompt-starters.ts` | 五张效果模板改写为 GPT Image 2.5 官方骨架，内置模板 6 张变 8 张 |
-| `app/01_canvas_app/src/prompt-library-item.ts` | 新增；`PromptLibraryItem` 类型抽到节点安全模块 |
-| `app/01_canvas_app/src/bridge-client.ts` | 改为 re-export `PromptLibraryItem`，其余逻辑不变 |
-| `app/01_canvas_app/test/prompt-starters.test.ts` | 新增 2 项内置图库内容测试 |
-| `docs/提示词内容包说明.md`、`docs/无限画布简化改版项目计划书.md`、`docs/简化版验收说明.md` | 同步内置模板数量与骨架说明 |
-
-本轮还新增本文，并更新 README、AGENTS 的交接入口。后续提交必须包含新增文件，不能只提交已跟踪文件差异。
+后续提交不要再把这些当作未提交现场；先跑 `git log --oneline -3` 核对。
 
 ## 3. 用户已确定的产品方向
 
@@ -171,7 +154,7 @@ QA 使用独立端口 3320/3330，已结束当时 QA 进程。重新启动时隔
 4. **并发绑定缺陷：偶发未复现，观察中**（2026-09-13 真实双任务验收发现）：并发打开第二个 ChatGPT 网页时，第一张任务的扩展绑定曾失效（面板报“页面消息与绑定任务或标签页不一致”），自动回收与自动 handoff 均被拒，任务永久停在 submitted，需人工“重新绑定当前任务”后手动检查结果才回收；同批第二个任务正常。排程、乱序回图、无重复发送、无串图已实测走通（任务 `16632f0c`/`d2de4392`，节点 12→14，revision 1843）。已按“同标签页 + 同任务 + 非终态 + 合法生成页”增加 nonce 自愈与 `binding-diagnostics` 留痕；同日复测双任务 2/2 全自动回图但缺陷未复现、自愈未触发，属偶发竞态，不能宣称根治。再次出现时先读 `binding-diagnostics` 取证。用户验收：`1人视_1_生成` 疑似背景建筑与首层结构被改，Codex 建议不采用；`3半鸟瞰_1_生成` 结构与光感较好，待用户确认。
 5. ~~补齐无扩展时“重新生成”的提示一致性~~ 已在 2026-09-13 完成：`SimpleCanvas.tsx` 的“开始渲染”和“重新生成”共用连接提示文案，未连接或版本不足时禁用“重新生成”；仍未验证真实网页点击。遗留任务入口也已在 2026-09-13 补齐：`simpleBlockingTask` 识别非本批活动任务，`lockNotice` 在队列中显示原因并在含“旧版”时给出“打开旧版兼容工作台”按钮，不再静默吞掉 `TASK_LOCKED`；详见回归保护基线“TASK_LOCKED 不再静默、遗留任务入口可见”。
 6. 官方提示词模板已处理：对话 `6aa3572c-2e88-83ec-9e25-ea92458edd40`《查找官方模板》的内容在 2026-09-11 Codex 会话日志中已恢复（不必再联网读取），并存档到 `D:\CodexWorkspace\02_任务\2026-09-13_官方提示词模板结合评估`。2026-09-13 已按上一轮适配判断，把五张效果渲染模板改写为 GPT Image 2.5 官方骨架并加入内置图库（内置模板由 6 张变 8 张）；未做真实回图、画质或浏览器逐张复制验收，不要宣称已通过真实生成验收。边界见回归保护基线“内置图库接入 GPT Image 2.5 官方骨架”。
-7. 在用户确认后整理提交当前分支、推送或打包；发布前按 AGENTS 做旧项目副本迁移及冒烟检查。不要把所有未提交内容误覆盖为旧版。
+7. 提交与推送已于 2026-09-13 完成（`0563c23`，远端同步）。剩余：在用户确认后打包发布；发布前按 AGENTS 做旧项目副本迁移及冒烟检查。不要把历史未提交内容误覆盖为旧版。
 
 ## 9. 其他资料与工作习惯
 
