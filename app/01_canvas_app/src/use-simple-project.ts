@@ -11,8 +11,14 @@ import { automationExtensionVersionSupported } from "./canvas-automation";
 export function useSimpleProject(projectId: string, projectName: string) {
   const [document, setDocument] = useState<CanvasProjectDocument | null>(null);
   const ref = useRef<CanvasProjectDocument | null>(null);
-  const [notice, setNotice] = useState(""); const [saveError, setSaveError] = useState("");
+  const [notice, setNoticeState] = useState(""); const [saveError, setSaveError] = useState("");
   const [lockNotice, setLockNotice] = useState("");
+  const noticeTimer = useRef<number | null>(null);
+  const setNotice = useCallback((message: string, options?: { sticky?: boolean }) => {
+    if (noticeTimer.current) { window.clearTimeout(noticeTimer.current); noticeTimer.current = null; }
+    setNoticeState(message);
+    if (message && options?.sticky === false) noticeTimer.current = window.setTimeout(() => { noticeTimer.current = null; setNoticeState(""); }, 4000);
+  }, []);
   const [saving, setSaving] = useState(false); const [tasks, setTasks] = useState<GenerationTask[]>([]);
   const [ready, setReady] = useState(false); const [loadingError, setLoadingError] = useState("");
   const saved = useRef(-1); const queue = useRef<Promise<unknown>>(Promise.resolve());
@@ -184,7 +190,7 @@ export function useSimpleProject(projectId: string, projectName: string) {
         await save(); count++;
       } catch (error) { failures.push(`${file.name}：${(error as Error).message}`); }
     }
-    setNotice(`已导入 ${count} 张图片${failures.length ? `；${failures.join("；")}` : ""}`);
+    setNotice(`已导入 ${count} 张图片${failures.length ? `；${failures.join("；")}` : ""}`, { sticky: false });
   };
 
   const start = async () => {
@@ -194,18 +200,18 @@ export function useSimpleProject(projectId: string, projectName: string) {
     if (doc.workflow?.batchRun && doc.workflow.batchRun.status !== "completed") throw new Error("旧版批次尚未结束，请从设置中的旧版入口处理");
     const run = makeSimpleBatch(doc, doc.simple!.selectedIds, doc.simple!.draft, doc.simple!.concurrency, doc.simple!.copiesPerImage);
     update((current) => { current.simple!.batch = run; return current; }); await save();
-    setNotice(`已建立 ${run.items.length} 个任务的渲染批次`);
+    setNotice(`已建立 ${run.items.length} 个任务的渲染批次`, { sticky: false });
   };
 
-  const stop = async () => { update((doc) => { const batch = doc.simple!.batch; if (batch) { batch.paused = true; for (const item of batch.items) if (item.status === "queued" || item.status === "failed") item.status = "cancelled"; } return doc; }); await save(); setNotice("已停止后续任务；已发送的图片继续生成并回收"); };
+  const stop = async () => { update((doc) => { const batch = doc.simple!.batch; if (batch) { batch.paused = true; for (const item of batch.items) if (item.status === "queued" || item.status === "failed") item.status = "cancelled"; } return doc; }); await save(); setNotice("已停止后续任务；已发送的图片继续生成并回收", { sticky: false }); };
   const pause = async (paused: boolean) => { update((doc) => { if (doc.simple!.batch) doc.simple!.batch.paused = paused; return doc; }); await save(); };
-  const endTracking = async (taskId: string) => { await cancelGenerationTask(taskId); setNotice("已结束本地跟踪，网页上已提交的生成不会被撤回"); };
+  const endTracking = async (taskId: string) => { await cancelGenerationTask(taskId); setNotice("已结束本地跟踪，网页上已提交的生成不会被撤回", { sticky: false }); };
   const retry = async (itemId: string) => {
     const current = ref.current!;
     const result = retrySimpleItem(current.simple!.batch!, itemId);
     update((doc) => { doc.simple!.batch = result.batch; if (!result.wasCancelled) doc.simple!.batch!.paused = false; return doc; });
     await save();
-    setNotice(result.wasCancelled ? "已按相同设置加入队列；点击“继续”后开始生成" : "已按相同设置建立新的生成任务");
+    setNotice(result.wasCancelled ? "已按相同设置加入队列；点击“继续”后开始生成" : "已按相同设置建立新的生成任务", { sticky: false });
     return result.replacementId;
   };
   const appendVariant = async (sourceVersionId: string) => {
@@ -215,14 +221,14 @@ export function useSimpleProject(projectId: string, projectName: string) {
     const next = appendSimpleVariant(batch, sourceVersionId, 1);
     update((doc) => { doc.simple!.batch = next; return doc; });
     await save();
-    setNotice(next.paused ? "已按相同设置追加 1 个版本；点击“继续”后开始生成" : "已按相同设置追加 1 个版本，提交后自动开始生成");
+    setNotice(next.paused ? "已按相同设置追加 1 个版本；点击“继续”后开始生成" : "已按相同设置追加 1 个版本，提交后自动开始生成", { sticky: false });
   };
   const recover = async () => {
     if (!ref.current) return;
     const result = await preserveCanvasConflictDraft(ref.current);
     ref.current = { ...result.currentProject, simple: result.currentProject.simple ?? emptySimplePreferences() };
     saved.current = result.currentProject.revision; conflict.current = false; setSaveError(""); setDocument(ref.current);
-    history.current = { before: [], after: [] }; setNotice("本地草稿已保存，已载入最新项目");
+    history.current = { before: [], after: [] }; setNotice("本地草稿已保存，已载入最新项目", { sticky: false });
   };
   const undo = (redo = false) => {
     const from = redo ? history.current.after : history.current.before;
